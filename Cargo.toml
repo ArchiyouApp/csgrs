@@ -29,10 +29,11 @@ inherits = "release"
 opt-level = "z"
 
 [dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"], optional = true }
 # geometry
-nalgebra = { version = "0.33", features = ["serde-serialize"] }
+nalgebra = { version = "=0.34.1", features = ["serde-serialize"] }
+curvo = { version = "0.1.52" } # for meshup - older version for compatibility with geo and geo-buf
 #alum = "0.6.1"
-#curvo = "0.1.52"
 robust = { version = "1.1.0", default-features = false, features = ["no_std"] }
 geo = { version = "0.29.3", default-features = false, features = ["use-serde"] }
 geo-buf = { version = "0.1.0", optional = true } # straight-skeleton offsetting iOverlay can handle this in v2
@@ -40,12 +41,12 @@ geo-buf = { version = "0.1.0", optional = true } # straight-skeleton offsetting 
 chull = { version = "0.2.4", optional = true }
 spade = { version = "2.15.0", optional = true }
 earcutr = { version = "0.5.0", optional = true }
-boolmesh = { version = "0.1.4", optional = true }
+boolmesh = { version = "0.1.5", optional = true }
 
-rapier3d-f64 = { version = "0.24.0", optional = true }
-rapier3d = { version = "0.24.0", optional = true }
-parry3d-f64  = { version = "0.19.0", optional = true }
-parry3d  = { version = "0.19.0", optional = true }
+rapier3d-f64 = { version = "0.31.0", optional = true }
+rapier3d = { version = "0.31.0", optional = true }
+parry3d-f64  = { version = "0.25.3", optional = true }
+parry3d  = { version = "0.25.3", optional = true }
 
 # bevy mesh conversion
 bevy_mesh = { version = "0.17", optional = true }
@@ -188,5 +189,11 @@ wasm = [
   "serde-wasm-bindgen",
   "serde_json",
   "serde",
+  "getrandom",
 ]
 spade = ["dep:spade"]
+boolmesh = ["dep:boolmesh"]
+parry3d-f64 = ["dep:parry3d-f64"]
+parry3d = ["dep:parry3d"]
+rapier3d-f64 = ["dep:rapier3d-f64"]
+rapier3d = ["dep:rapier3d"]

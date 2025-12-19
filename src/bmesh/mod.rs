@@ -9,11 +9,10 @@ use crate::float_types::{
 };
 use crate::csg::CSG;
 
-use boolmesh::{
-    compute_boolean,
-    Manifold,
-    OpType,
-};
+use boolmesh::compute_boolean;
+use boolmesh::prelude::OpType; // MU hotfix
+use boolmesh::prelude::Manifold; // MU hotfix
+
 
 use nalgebra::{Matrix4, Point3};
 use std::{fmt::Debug, sync::OnceLock};
@@ -61,6 +60,7 @@ impl<S: Clone + Send + Sync + Debug> BMesh<S> {
 
     /// Core helper for boolean ops, handling empty cases and delegating to boolmesh.
     fn boolean(&self, other: &Self, op: OpType) -> Self {
+        
         use OpType::*;
 
         match (&self.manifold, &other.manifold) {
