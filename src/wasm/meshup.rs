@@ -168,6 +168,11 @@ impl Point2Js {
     pub fn y(&self) -> f64 {
         self.inner.y as f64
     }
+
+    #[wasm_bindgen(js_name = toString)]
+    pub fn to_string_js(&self) -> String {
+        format!("<Point2({}, {})>", self.inner.x, self.inner.y)
+    }
 }
 
 // Rust-only conversions (not visible to JS)
@@ -207,6 +212,11 @@ impl Vector2Js {
     #[wasm_bindgen(getter)]
     pub fn y(&self) -> f64 {
         self.inner.y as f64
+    }
+
+    #[wasm_bindgen(js_name = toString)]
+    pub fn to_string_js(&self) -> String {
+        format!("<Vector2({}, {})>", self.inner.x, self.inner.y)
     }
 }
 

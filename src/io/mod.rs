@@ -17,7 +17,7 @@ mod ply;
 mod amf;
 
 #[cfg(feature = "gltf-io")]
-mod gltf;
+pub mod gltf;
 
 /// Generic I/O and format‑conversion errors.
 ///
@@ -104,3 +104,6 @@ impl From<String> for IoError {
         Self::ObjParsing(value)
     }
 }
+
+// Re-export the types you need
+pub use gltf::{GltfOptions, UpAxis};

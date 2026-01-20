@@ -20,6 +20,19 @@ impl PlaneJs {
         PlaneJs::from_vertices(vertices)
     }
 
+    // +MESHUP
+    // Get points spanning the Plane
+    pub fn points(&self) -> Vec<Point3Js> {
+        vec![
+            self.inner.point_a.into(),
+            self.inner.point_b.into(),
+            self.inner.point_c.into(),
+        ]
+        .into_iter()
+        .map(|p| Point3Js { inner: p })
+        .collect()
+    }
+
     #[wasm_bindgen(js_name = FromVertices)]
     pub fn from_vertices(vertices: Vec<VertexJs>) -> PlaneJs {
         // Require at least 3 vertices (Plane::from_vertices will index [0..2])
@@ -62,7 +75,7 @@ impl PlaneJs {
         Self { inner: plane }
     }
 
-    #[wasm_bindgen(js_name = FromPoints)]
+    #[wasm_bindgen(js_name = fromPoints)] // +MESHUP (changed _F_rom)
     pub fn from_points(a: &Point3Js, b: &Point3Js, c: &Point3Js) -> Self {
         let point_a: Point3<Real> = a.into();
         let point_b: Point3<Real> = b.into();
@@ -79,14 +92,14 @@ impl PlaneJs {
     }
 
     // Constructor: Create a plane from a normal vector and an offset
-    #[wasm_bindgen(js_name = FromNormalComponents)]
+    #[wasm_bindgen(js_name = fromNormalComponents)]
     pub fn from_normal_components(nx: f64, ny: f64, nz: f64, offset: Real) -> Self {
         let normal: Vector3<Real> = Vector3::new(nx as Real, ny as Real, nz as Real);
         let plane = Plane::from_normal(normal, offset);
         Self { inner: plane }
     }
 
-    #[wasm_bindgen(js_name = FromNormal)]
+    #[wasm_bindgen(js_name = fromNormal)]
     pub fn from_normal(normal: &Vector3Js, offset: Real) -> Self {
         let n: Vector3<Real> = normal.into();
         let plane = Plane::from_normal(n, offset);

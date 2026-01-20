@@ -5,6 +5,7 @@ use crate::wasm::{
     js_metadata_to_string, matrix_js::Matrix4Js, plane_js::PlaneJs, point_js::Point3Js,
     polygon_js::PolygonJs, sketch_js::SketchJs, vector_js::Vector3Js,
 };
+use crate::io::gltf::{GltfOptions, UpAxis};
 use js_sys::{Float64Array, Object, Reflect, Uint32Array};
 use nalgebra::{Matrix4, Point3, Vector3};
 use serde_wasm_bindgen::from_value;
@@ -52,6 +53,14 @@ impl MeshJs {
         let obj = self.to_arrays();
         let idx = Reflect::get(&obj, &"indices".into()).unwrap();
         idx.dyn_into::<Uint32Array>().unwrap()
+    }
+
+    /// +MESHUP
+    pub fn polygons(&self) -> Vec<PolygonJs> 
+    {
+        self.inner.polygons.iter().map(
+            |p| PolygonJs { inner: p.clone() }
+        ).collect()
     }
 
     /// Number of triangles (handy to sanity-check).
@@ -258,6 +267,13 @@ impl MeshJs {
         }
     }
 
+    //// +MESHUP
+    pub fn mirror(&self, plane: &PlaneJs) -> Self {
+        Self {
+            inner: self.inner.mirror(plane.inner.clone())
+        }
+    }
+
     #[wasm_bindgen(js_name = float)]
     pub fn float(&self) -> Self {
         Self {
@@ -269,6 +285,14 @@ impl MeshJs {
     pub fn inverse(&self) -> Self {
         Self {
             inner: self.inner.inverse(),
+        }
+    }
+
+    //// +MESHUP
+    pub fn clone(&self) -> Self
+    {
+        Self {
+            inner: self.inner.clone(),
         }
     }
 
@@ -470,9 +494,17 @@ impl MeshJs {
             .to_amf_with_color(object_name, units, (r as Real, g as Real, b as Real))
     }
     
-	#[wasm_bindgen(js_name = toGLTF)]
-    pub fn to_gltf(&self, object_name: &str) -> String {
-        self.inner.to_gltf(object_name)
+    #[wasm_bindgen(js_name = toGLTF)]
+    pub fn to_gltf(&self, object_name: &str, up_axis: &str) -> String {
+
+        let axis = match up_axis.to_uppercase().as_str() {
+            "Y" => UpAxis::Y,
+            "X" => UpAxis::X,
+            _ => UpAxis::Z,  // Default to Z-up
+        };
+        
+        let options = GltfOptions::new(object_name).with_up_axis(axis);
+        self.inner.to_gltf_with_options(options)
     }
 
     #[wasm_bindgen(js_name=fromSketch)]
