@@ -4,7 +4,7 @@
 
 use crate::float_types::Real;
 use nalgebra::{ Point2, Point3, Vector2 };
-use curvo::prelude::NurbsCurve2D;
+use curvo::prelude::{ NurbsCurve2D, Tessellation, BoundingBox };
 use super::point_js::{ Point3Js };
 
 use wasm_bindgen::prelude::*;
@@ -85,19 +85,32 @@ impl NurbsCurve2DJs
     //    }
     //}
 
-    /// ACCESSORS AND PROPERTIES ///
-    
-    #[wasm_bindgen]
-    pub fn knots(&self) -> Vec<Real> {
-        self.inner.knots().to_vec()
+    /// PROPERTIES ///
+
+    #[wasm_bindgen(js_name = controlPoints)]
+    pub fn control_points(&self) -> Vec<Point2Js> 
+    {
+        // IMPORTANT: Curvo returns control points including weight component
+        self.inner.control_points().iter()
+            .map(|p| Point2Js::new(p.x, p.y)) // Remove the weight factor
+            .collect()
     }
 
-    #[wasm_bindgen]
     pub fn weights(&self) -> Vec<Real> {
         self.inner.weights().to_vec()
     }
 
-    #[wasm_bindgen]
+    pub fn knots(&self) -> Vec<Real> {
+        self.inner.knots().to_vec()
+    }
+
+    /// Get the degree of the curve
+    pub fn degree(&self) -> usize {
+        self.inner.degree()
+    }
+
+    //// CALCULATED PROPERTIES ////
+
     pub fn length(&self) -> Real {
         self.inner.try_length()
             .expect("Failed to compute curve length")
@@ -123,12 +136,6 @@ impl NurbsCurve2DJs
         }
     }
 
-    /// Get the degree of the curve
-    #[wasm_bindgen]
-    pub fn degree(&self) -> usize {
-        self.inner.degree()
-    }
-
     /// Get the point at given parameter
     #[wasm_bindgen(js_name = pointAtParam)]
     pub fn point_at_param(&self, param: Real) -> Point2Js {
@@ -140,6 +147,28 @@ impl NurbsCurve2DJs
     pub fn tangent_at(&self, param: Real) -> Vector2Js {
         Vector2Js::from(self.inner.tangent_at(param))
     }
+
+    pub fn bbox(&self) -> Vec<Point2Js> {
+        let bbox = BoundingBox::from(&self.inner);
+        let min = bbox.min();
+        let max = bbox.max();
+        vec![
+            Point2Js::new(min.x as f64, min.y as f64),
+            Point2Js::new(max.x as f64, max.y as f64),
+        ]
+    }
+
+    /// Tessellate curve into evenly spaced points by count
+    #[wasm_bindgen(js_name = tessellate)]
+    pub fn tessellate(&self, tol: Option<f64>) -> Vec<Point2Js> {
+        let t = tol.unwrap_or(1e-4);
+        return
+            self.inner.tessellate(Some(t))
+            .iter()
+            .map(|p| Point2Js::new(p.x as f64, p.y as f64))
+            .collect();
+    }
+
 
 }
 
