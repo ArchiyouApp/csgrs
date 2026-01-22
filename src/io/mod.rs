@@ -105,5 +105,5 @@ impl From<String> for IoError {
     }
 }
 
-// Re-export the types you need
-pub use gltf::{GltfOptions, UpAxis};
+// Re-export for use in WASM bindings
+pub use gltf::UpAxis;

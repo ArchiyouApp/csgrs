@@ -5,7 +5,7 @@ use crate::wasm::{
     js_metadata_to_string, matrix_js::Matrix4Js, plane_js::PlaneJs, point_js::Point3Js,
     polygon_js::PolygonJs, sketch_js::SketchJs, vector_js::Vector3Js,
 };
-use crate::io::gltf::{GltfOptions, UpAxis};
+use crate::io::gltf::{UpAxis};
 use js_sys::{Float64Array, Object, Reflect, Uint32Array};
 use nalgebra::{Matrix4, Point3, Vector3};
 use serde_wasm_bindgen::from_value;
@@ -498,13 +498,12 @@ impl MeshJs {
     pub fn to_gltf(&self, object_name: &str, up_axis: &str) -> String {
 
         let axis = match up_axis.to_uppercase().as_str() {
-            "Y" => UpAxis::Y,
-            "X" => UpAxis::X,
-            _ => UpAxis::Z,  // Default to Z-up
+            "Y" => Some(UpAxis::Y),
+            "X" => Some(UpAxis::X),
+            "Z" => Some(UpAxis::Z),
+            _ => None,  // Let Rust use default in inner.to_gltf()
         };
-        
-        let options = GltfOptions::new(object_name).with_up_axis(axis);
-        self.inner.to_gltf_with_options(options)
+        self.inner.to_gltf(object_name, axis)
     }
 
     #[wasm_bindgen(js_name=fromSketch)]

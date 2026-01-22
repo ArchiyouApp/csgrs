@@ -24,43 +24,6 @@ pub enum UpAxis {
     X,
 }
 
-/// Options for glTF export
-#[derive(Debug, Clone)]
-pub struct GltfOptions {
-    /// Which axis is "up" in the source data (default: Z for CAD compatibility)
-    pub up_axis: UpAxis,
-    /// Name of the object/mesh in the glTF file
-    pub object_name: String,
-}
-
-impl Default for GltfOptions {
-    fn default() -> Self {
-        Self {
-            up_axis: UpAxis::Z,  // CAD default: Z is up
-            object_name: "mesh".to_string(),
-        }
-    }
-}
-
-impl GltfOptions {
-    pub fn new(object_name: &str) -> Self {
-        Self {
-            object_name: object_name.to_string(),
-            ..Default::default()
-        }
-    }
-
-    pub fn with_up_axis(mut self, up_axis: UpAxis) -> Self {
-        self.up_axis = up_axis;
-        self
-    }
-
-    pub fn with_name(mut self, name: &str) -> Self {
-        self.object_name = name.to_string();
-        self
-    }
-}
-
 /// Transform a point from source coordinate system to glTF (Y-up)
 fn transform_point(point: Point3<Real>, up_axis: UpAxis) -> Point3<Real> {
     match up_axis {
@@ -255,90 +218,61 @@ fn gltf_from_vertices(
 }
 
 impl<S: Clone + Debug + Send + Sync> crate::mesh::Mesh<S> {
+    
     /// Export to glTF with default options (Z-up, name: "mesh")
-    pub fn to_gltf(&self, object_name: &str) -> String {
-        self.to_gltf_with_options(GltfOptions::new(object_name))
-    }
-
-    /// Export to glTF with custom options
-    pub fn to_gltf_with_options(&self, options: GltfOptions) -> String {
-        let (vertices, indices) = build_gltf_buffers(self, options.up_axis);
-        gltf_from_vertices(&vertices, &indices, &options.object_name)
+    pub fn to_gltf(&self, object_name: &str, up_axis: Option<UpAxis>) -> String {
+        let axis = up_axis.unwrap_or(UpAxis::Z);
+        let (vertices, indices) = build_gltf_buffers(self, axis);
+        gltf_from_vertices(&vertices, &indices, object_name)
     }
 
     pub fn write_gltf<W: Write>(
         &self,
         writer: &mut W,
         object_name: &str,
+        up_axis: Option<UpAxis>
     ) -> std::io::Result<()> {
-        let gltf_content = self.to_gltf(object_name);
+        let gltf_content = self.to_gltf(object_name, up_axis);
         writer.write_all(gltf_content.as_bytes())
     }
 
-    pub fn write_gltf_with_options<W: Write>(
-        &self,
-        writer: &mut W,
-        options: GltfOptions,
-    ) -> std::io::Result<()> {
-        let gltf_content = self.to_gltf_with_options(options);
-        writer.write_all(gltf_content.as_bytes())
-    }
 }
 
 impl<S: Clone + Debug + Send + Sync> crate::sketch::Sketch<S> {
-    pub fn to_gltf(&self, object_name: &str) -> String {
-        self.to_gltf_with_options(GltfOptions::new(object_name))
-    }
 
-    pub fn to_gltf_with_options(&self, options: GltfOptions) -> String {
-        let (vertices, indices) = build_gltf_buffers(self, options.up_axis);
-        gltf_from_vertices(&vertices, &indices, &options.object_name)
+    pub fn to_gltf(&self, object_name: &str, up_axis: Option<UpAxis>) -> String {
+        let axis = up_axis.unwrap_or(UpAxis::Z);
+        let (vertices, indices) = build_gltf_buffers(self, axis);
+        gltf_from_vertices(&vertices, &indices, object_name)
     }
 
     pub fn write_gltf<W: Write>(
         &self,
         writer: &mut W,
         object_name: &str,
+        up_axis: Option<UpAxis>,
     ) -> std::io::Result<()> {
-        let gltf_content = self.to_gltf(object_name);
+        let gltf_content = self.to_gltf(object_name, up_axis);
         writer.write_all(gltf_content.as_bytes())
     }
 
-    pub fn write_gltf_with_options<W: Write>(
-        &self,
-        writer: &mut W,
-        options: GltfOptions,
-    ) -> std::io::Result<()> {
-        let gltf_content = self.to_gltf_with_options(options);
-        writer.write_all(gltf_content.as_bytes())
-    }
 }
 
 impl<S: Clone + Debug + Send + Sync> crate::bmesh::BMesh<S> {
-    pub fn to_gltf(&self, object_name: &str) -> String {
-        self.to_gltf_with_options(GltfOptions::new(object_name))
-    }
 
-    pub fn to_gltf_with_options(&self, options: GltfOptions) -> String {
-        let (vertices, indices) = build_gltf_buffers(self, options.up_axis);
-        gltf_from_vertices(&vertices, &indices, &options.object_name)
+    pub fn to_gltf(&self, object_name: &str, up_axis: Option<UpAxis>) -> String {
+        let axis = up_axis.unwrap_or(UpAxis::Z);
+        let (vertices, indices) = build_gltf_buffers(self, axis);
+        gltf_from_vertices(&vertices, &indices, object_name)
     }
 
     pub fn write_gltf<W: Write>(
         &self,
         writer: &mut W,
         object_name: &str,
+        up_axis: Option<UpAxis>,
     ) -> std::io::Result<()> {
-        let gltf_content = self.to_gltf(object_name);
-        writer.write_all(gltf_content.as_bytes())
-    }
-
-    pub fn write_gltf_with_options<W: Write>(
-        &self,
-        writer: &mut W,
-        options: GltfOptions,
-    ) -> std::io::Result<()> {
-        let gltf_content = self.to_gltf_with_options(options);
+        let gltf_content = self.to_gltf(object_name, up_axis);
         writer.write_all(gltf_content.as_bytes())
     }
 }
