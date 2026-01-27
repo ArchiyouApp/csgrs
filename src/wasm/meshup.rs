@@ -163,6 +163,12 @@ impl NurbsCurve3DJs
         self.inner.knots().to_vec()
     }
 
+    #[wasm_bindgen(js_name = knotsDomain)]
+    pub fn knots_domain(&self) -> Vec<Real> {
+        let domain = self.inner.knots_domain();
+        vec![domain.0, domain.1]
+    }
+
     /// Get the degree of the curve
     pub fn degree(&self) -> usize {
         self.inner.degree()
@@ -217,31 +223,53 @@ impl NurbsCurve3DJs
         ]
     }
 
+    #[wasm_bindgen(js_name = filletAtParams)]
+    pub fn fillet_at_params(&self, radius: Real, at: Vec<Real>) -> Result<CompoundCurve3DJs, JsValue> {
+        let knots = self.inner.knots();
+        
+        // Find closest knot value for each parameter and return slightly less for robustness
+        let adjusted_params: Vec<Real> = at.into_iter()
+            .map(|p| {
+                // Find the closest knot value
+                let closest_knot = knots.iter()
+                    .min_by(|a, b| {
+                        let diff_a = (*a - p).abs();
+                        let diff_b = (*b - p).abs();
+                        diff_a.partial_cmp(&diff_b).unwrap()
+                    })
+                    .copied()
+                    .unwrap_or(p);
+                
+                // Return slightly less than the knot value for robustness
+                closest_knot - 1e-6
+            })
+            .collect();
+        
+        let fillet_options = FilletRadiusParameterOption::new(radius, adjusted_params);
+        match self.inner.fillet(fillet_options) {
+            Ok(compound_curve) => Ok(CompoundCurve3DJs::from(compound_curve)),
+            Err(e) => Err(JsValue::from_str(&format!("Failed to fillet curve: {:?}", e)))
+        }
+    }
+
     // Fillet sharp corner(s) of Curve. Optionally only at given point(s)
     pub fn fillet(&self, radius: Real, at: Option<Vec<Point3Js>>) -> Result<CompoundCurve3DJs, JsValue> {
         
         match at {
             Some(points) => {
-                // Collect parameters, propagating any errors
+  
                 let params: Result<Vec<Real>, JsValue> = points.into_iter()
                     .map(|p| self.param_closest_to_point(&p))
                     .collect();
-                
                 let params = params?;
-                
-                let fillet_options = FilletRadiusParameterOption::new(radius, params);
-
-                match self.inner.fillet(fillet_options) {
-                    Ok(compound_curve) => Ok(CompoundCurve3DJs::from(compound_curve)),
-                    Err(e) => Err(JsValue::from_str(&format!("Failed to fillet curve: {:?}", e)))
-                }
+                self.fillet_at_params(radius, params)
             },
             None => {
                 // Fillet all sharp corners
                 let fillet_options = FilletRadiusOption::new(radius);
                 match self.inner.fillet(fillet_options) {
                     Ok(compound_curve) => Ok(CompoundCurve3DJs::from(compound_curve)),
-                    Err(e) => Err(JsValue::from_str(&format!("Failed to fillet curve: {:?}", e)))
+                    Err(e) => Err(JsValue::from_str(&format!("NurbsCurve3DJs::fillet(): Failed to fillet curve: {:?}", e)))
                 }
             }
         }
