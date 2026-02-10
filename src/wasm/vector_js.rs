@@ -50,6 +50,13 @@ impl Vector3Js {
         self.inner.is_orthogonal(tolerance)
     }
 
+    pub fn abs(&self) -> Vector3Js
+    {
+        Vector3Js {
+            inner: self.inner.abs()
+        }
+    }
+
     pub fn reverse(&self) -> Vector3Js
     {
         Vector3Js {
