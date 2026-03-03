@@ -6,7 +6,8 @@ use crate::float_types::Real;
 use nalgebra::{ Point3, Point4, Rotation3, Translation3, Matrix4, Vector3 };
 use curvo::prelude::{ NurbsCurve2D, NurbsCurve3D, CompoundCurve2D, Tessellation, BoundingBox, Transformable,
         CompoundCurve3D, Fillet, FilletRadiusOption, FilletRadiusParameterOption,
-        CurveOffsetOption, CurveOffsetCornerType, Offset };
+        CurveOffsetOption, CurveOffsetCornerType, Offset, Intersects, HasIntersection,
+        TrimRange, Split };
 
 use super::point_js::{ Point3Js };
 use super::vector_js::{ Vector3Js };
@@ -121,6 +122,8 @@ impl NurbsCurve3DJs
         Self { inner: self.inner.clone() }
     }
 
+    
+
     // Create a polyline NurbsCurve3D from a list of points
     #[wasm_bindgen(js_name = makePolyline)]
     pub fn make_polyline(points: Vec<Point3Js>, normalize: bool) -> Self
@@ -151,6 +154,48 @@ impl NurbsCurve3DJs
             Ok(curve) => Ok(Self { inner: curve }),
             Err(e) => Err(JsValue::from_str(&format!("Interpolation failed: {:?}", e)))
         }
+    }
+
+    /// Create an exact NURBS circle.
+    ///
+    /// # Arguments
+    ///
+    /// * `radius`  – radius of the circle (required)
+    /// * `center`  – centre point; defaults to the origin
+    /// * `normal`  – plane normal; defaults to `(0, 0, 1)` (XY-plane).
+    ///               The X and Y axes of the circle plane are derived from this vector.
+    ///
+    /// Returns a closed degree-2 NURBS curve that is an exact rational circle.
+    #[wasm_bindgen(js_name = makeCircle)]
+    pub fn make_circle(
+        radius: Real,
+        center: Option<Point3Js>,
+        normal: Option<Vector3Js>,
+    ) -> Result<NurbsCurve3DJs, JsValue>
+    {
+        // Resolve centre
+        let center_pt: Point3<Real> = center
+            .map(|c| c.inner)
+            .unwrap_or_else(Point3::origin);
+
+        // Resolve the plane normal and derive two orthonormal axes that lie in the plane
+        let n: Vector3<Real> = normal
+            .map(|v| Vector3::new(v.inner.x, v.inner.y, v.inner.z).normalize())
+            .unwrap_or_else(Vector3::z);
+
+        // Build a stable x_axis perpendicular to n
+        // Avoid degeneracy by choosing a seed vector not parallel to n
+        let seed = if n.cross(&Vector3::x()).norm() > 1e-6 {
+            Vector3::x()
+        } else {
+            Vector3::y()
+        };
+        let x_axis: Vector3<Real> = n.cross(&seed).normalize();
+        let y_axis: Vector3<Real> = n.cross(&x_axis).normalize();
+
+        NurbsCurve3D::try_circle(&center_pt, &x_axis, &y_axis, radius)
+            .map(|curve| NurbsCurve3DJs { inner: curve })
+            .map_err(|e| JsValue::from_str(&format!("makeCircle failed: {:?}", e)))
     }
 
     /// PROPERTIES ///
@@ -190,9 +235,12 @@ impl NurbsCurve3DJs
             .expect("Failed to compute curve length")
     }
 
+    pub fn closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+
     #[wasm_bindgen(js_name = paramAtLength)]
-    pub fn param_at_length(&self, length: Real) -> Result<Real, JsValue> 
-    {
+    pub fn param_at_length(&self, length: Real) -> Result<Real, JsValue> {
         match self.inner.try_parameter_at_length(length, Some(1e-4)) 
         {
             Ok(param) => Ok(param),
@@ -281,6 +329,74 @@ impl NurbsCurve3DJs
                     Err(e) => Err(JsValue::from_str(&format!("NurbsCurve3DJs::fillet(): Failed to fillet curve: {:?}", e)))
                 }
             }
+        }
+    }
+
+
+    /// Extend a curve at one or both ends.
+    ///
+    /// - **Degree 1 (polyline)**: appends/prepends a new control point along the last/first segment direction.
+    /// - **Degree > 1**: adds a straight-line segment tangent to the curve at the boundary.
+    ///
+    /// Always returns a `CompoundCurve3DJs` (single-span for extended polylines).
+    ///
+    /// # Arguments
+    /// * `distance` – how far to extend (world units)
+    /// * `side`     – `"end"` (default), `"start"`, or `"both"`
+    pub fn extend(&self, distance: Real, side: Option<String>) -> Result<CompoundCurve3DJs, JsValue> {
+        let side = side.as_deref().unwrap_or("end").to_string();
+
+        if self.inner.degree() == 1 {
+            // Polyline: extend by adding control points
+            let cps: Vec<Point3<Real>> = self.inner.dehomogenized_control_points();
+
+            if cps.len() < 2 {
+                return Err(JsValue::from_str(
+                    "Curve must have at least 2 control points to extend",
+                ));
+            }
+
+            let mut new_cps = cps.clone();
+
+            if side == "end" || side == "both" {
+                let n = new_cps.len();
+                let dir = (new_cps[n - 1] - new_cps[n - 2]).normalize();
+                new_cps.push(new_cps[n - 1] + dir * distance);
+            }
+
+            if side == "start" || side == "both" {
+                let dir = (new_cps[0] - new_cps[1]).normalize();
+                new_cps.insert(0, new_cps[0] + dir * distance);
+            }
+
+            let extended = NurbsCurve3D::polyline(&new_cps, false);
+            CompoundCurve3D::try_new(vec![extended])
+                .map(CompoundCurve3DJs::from)
+                .map_err(|e| JsValue::from_str(&format!("Failed to wrap extended polyline: {:?}", e)))
+        } else {
+            // Higher-degree: add a tangent line segment at the boundary
+            let (t_start, t_end) = self.inner.knots_domain();
+            let mut spans: Vec<NurbsCurve3D<Real>> = Vec::new();
+
+            if side == "start" || side == "both" {
+                let start_pt = self.inner.point_at(t_start);
+                let start_tan = self.inner.tangent_at(t_start).normalize();
+                let new_pt = start_pt - start_tan * distance;
+                spans.push(NurbsCurve3D::polyline(&[new_pt, start_pt], false));
+            }
+
+            spans.push(self.inner.clone());
+
+            if side == "end" || side == "both" {
+                let end_pt = self.inner.point_at(t_end);
+                let end_tan = self.inner.tangent_at(t_end).normalize();
+                let new_pt = end_pt + end_tan * distance;
+                spans.push(NurbsCurve3D::polyline(&[end_pt, new_pt], false));
+            }
+
+            CompoundCurve3D::try_new(spans)
+                .map(CompoundCurve3DJs::from)
+                .map_err(|e| JsValue::from_str(&format!("Failed to create extended curve: {:?}", e)))
         }
     }
 
@@ -486,6 +602,63 @@ impl NurbsCurve3DJs
             Vector3Js::from(local_x),
             Vector3Js::from(local_y),
         ]
+    }
+
+    //// TRIM & SPLIT ////
+
+    /// Trim the curve to the sub-curve between parameters t0 and t1.
+    /// When t0 < t1, returns the "inside" portion.
+    /// Returns one or more NurbsCurve3DJs segments.
+    #[wasm_bindgen(js_name = trimRange)]
+    pub fn trim_range(&self, t0: Real, t1: Real) -> Result<Vec<NurbsCurve3DJs>, JsValue> {
+        self.inner
+            .try_trim_range((t0, t1))
+            .map(|curves| curves.into_iter().map(NurbsCurve3DJs::from).collect())
+            .map_err(|e| JsValue::from_str(&format!("trimRange() failed: {:?}", e)))
+    }
+
+    /// Split the curve at parameter t, returning [left, right].
+    #[wasm_bindgen(js_name = split)]
+    pub fn split(&self, t: Real) -> Result<Vec<NurbsCurve3DJs>, JsValue> {
+        self.inner
+            .try_split(t)
+            .map(|(a, b)| vec![NurbsCurve3DJs::from(a), NurbsCurve3DJs::from(b)])
+            .map_err(|e| JsValue::from_str(&format!("split() failed: {:?}", e)))
+    }
+
+    //// INTERACTIONS WITH OTHER CURVES ////
+    
+    /// Find intersection points with another `NurbsCurve3DJs`.
+    /// Returns the 3D intersection points.
+    pub fn intersect(&self, other: &NurbsCurve3DJs) -> Result<Vec<Point3Js>, JsValue> {
+        self.inner
+            .find_intersection(&other.inner, None)
+            .map(|its| {
+                its.into_iter()
+                    .map(|it| Point3Js::from(it.a().0.clone()))
+                    .collect()
+            })
+            .map_err(|e| JsValue::from_str(&format!("intersect() failed: {:?}", e)))
+    }
+
+    /// Find intersection points with a `CompoundCurve3DJs`.
+    /// Intersects `self` against each span of the compound curve.
+    /// Returns the 3D intersection points.
+    #[wasm_bindgen(js_name = intersectCompound)]
+    pub fn intersect_compound(&self, other: &CompoundCurve3DJs) -> Result<Vec<Point3Js>, JsValue> {
+        let mut results: Vec<Point3Js> = Vec::new();
+
+        for span in other.inner.spans() {
+            let its = self.inner
+                .find_intersection(span, None)
+                .map_err(|e| JsValue::from_str(&format!("intersectCompound() failed on span: {:?}", e)))?;
+
+            for it in its {
+                results.push(Point3Js::from(it.a().0.clone()));
+            }
+        }
+
+        Ok(results)
     }
 
 }
@@ -781,6 +954,151 @@ impl CompoundCurve3DJs
             Ok(compound) => Ok(CompoundCurve3DJs::from(compound)),
             Err(e) => Err(JsValue::from_str(&format!("Failed to create compound curve from offset result: {:?}", e)))
         }
+    }
+
+    /// Extend the compound curve at one or both ends.
+    ///
+    /// - **Degree-1 boundary spans** are extended inline (new control point).
+    /// - **Higher-degree boundary spans** get a tangent line segment prepended/appended.
+    ///
+    /// # Arguments
+    /// * `distance` – how far to extend (world units)
+    /// * `side`     – `"end"` (default), `"start"`, or `"both"`
+    pub fn extend(&self, distance: Real, side: Option<String>) -> Result<CompoundCurve3DJs, JsValue> {
+        let side_str = side.as_deref().unwrap_or("end").to_string();
+
+        let mut spans: Vec<NurbsCurve3D<Real>> = self.inner.clone().into_spans();
+
+        if spans.is_empty() {
+            return Err(JsValue::from_str("Cannot extend an empty compound curve"));
+        }
+
+        // Extend at start
+        if side_str == "start" || side_str == "both" {
+            let first = &spans[0];
+            if first.degree() == 1 {
+                let cps: Vec<Point3<Real>> = first.dehomogenized_control_points();
+                if cps.len() >= 2 {
+                    let dir = (cps[0] - cps[1]).normalize();
+                    let mut new_cps = cps;
+                    new_cps.insert(0, new_cps[0] + dir * distance);
+                    spans[0] = NurbsCurve3D::polyline(&new_cps, false);
+                }
+            } else {
+                let (t_start, _) = first.knots_domain();
+                let start_pt = first.point_at(t_start);
+                let start_tan = first.tangent_at(t_start).normalize();
+                let new_pt = start_pt - start_tan * distance;
+                spans.insert(0, NurbsCurve3D::polyline(&[new_pt, start_pt], false));
+            }
+        }
+
+        // Extend at end
+        if side_str == "end" || side_str == "both" {
+            let last = spans.last().unwrap().clone();
+            if last.degree() == 1 {
+                let cps: Vec<Point3<Real>> = last.dehomogenized_control_points();
+                let n = cps.len();
+                if n >= 2 {
+                    let dir = (cps[n - 1] - cps[n - 2]).normalize();
+                    let mut new_cps = cps;
+                    new_cps.push(new_cps[n - 1] + dir * distance);
+                    *spans.last_mut().unwrap() = NurbsCurve3D::polyline(&new_cps, false);
+                }
+            } else {
+                let (_, t_end) = last.knots_domain();
+                let end_pt = last.point_at(t_end);
+                let end_tan = last.tangent_at(t_end).normalize();
+                let new_pt = end_pt + end_tan * distance;
+                spans.push(NurbsCurve3D::polyline(&[end_pt, new_pt], false));
+            }
+        }
+
+        CompoundCurve3D::try_new(spans)
+            .map(CompoundCurve3DJs::from)
+            .map_err(|e| JsValue::from_str(&format!(
+                "Failed to rebuild compound curve after extend: {:?}", e
+            )))
+    }
+
+    //// TRIM & SPLIT ////
+
+    /// Trim the compound curve to the sub-curve between parameters t0 and t1.
+    /// Parameters are in the compound curve's global knot domain.
+    /// Returns one or more NurbsCurve3DJs segments.
+    #[wasm_bindgen(js_name = trimRange)]
+    pub fn trim_range(&self, t0: Real, t1: Real) -> Result<Vec<NurbsCurve3DJs>, JsValue> {
+        self.inner
+            .try_trim_range((t0, t1))
+            .map(|curves| curves.into_iter().map(NurbsCurve3DJs::from).collect())
+            .map_err(|e| JsValue::from_str(&format!("trimRange() failed: {:?}", e)))
+    }
+
+    /// Split the compound curve at parameter t, returning [left, right] as CompoundCurve3DJs.
+    #[wasm_bindgen(js_name = split)]
+    pub fn split(&self, t: Real) -> Result<Vec<CompoundCurve3DJs>, JsValue> {
+        self.inner
+            .try_split(t)
+            .map(|(a, b)| vec![CompoundCurve3DJs::from(a), CompoundCurve3DJs::from(b)])
+            .map_err(|e| JsValue::from_str(&format!("split() failed: {:?}", e)))
+    }
+
+    /// Find the closest parameter on this compound curve to the given point.
+    /// Iterates over all spans and returns the parameter with the minimum distance.
+    #[wasm_bindgen(js_name = paramClosestToPoint)]
+    pub fn param_closest_to_point(&self, point: &Point3Js) -> Result<Real, JsValue> {
+        let mut best_param: Option<Real> = None;
+        let mut best_dist_sq = Real::MAX;
+
+        for span in self.inner.spans() {
+            if let Ok(param) = span.find_closest_parameter(&point.inner) {
+                let pt = span.point_at(param);
+                let dist_sq = (pt - point.inner).norm_squared();
+                if dist_sq < best_dist_sq {
+                    best_dist_sq = dist_sq;
+                    best_param = Some(param);
+                }
+            }
+        }
+
+        best_param.ok_or_else(|| JsValue::from_str("paramClosestToPoint: no spans could compute closest parameter"))
+    }
+
+    //// INTERACTIONS WITH OTHER CURVES ////
+    
+    /// Find intersection points with a `NurbsCurve3DJs`.
+    /// Intersects each span of `self` against `other`.
+    /// Returns the 3D intersection points.
+    pub fn intersect(&self, other: &NurbsCurve3DJs) -> Result<Vec<Point3Js>, JsValue> {
+        let mut results: Vec<Point3Js> = Vec::new();
+        for span in self.inner.spans() {
+            let its = span
+                .find_intersection(&other.inner, None)
+                .map_err(|e| JsValue::from_str(&format!("intersect() failed on span: {:?}", e)))?;
+            for it in its {
+                results.push(Point3Js::from(it.a().0.clone()));
+            }
+        }
+        Ok(results)
+    }
+
+    /// Find intersection points with another `CompoundCurve3DJs`.
+    /// Intersects each span of `self` against each span of `other`.
+    /// Returns the 3D intersection points.
+    #[wasm_bindgen(js_name = intersectCompound)]
+    pub fn intersect_compound(&self, other: &CompoundCurve3DJs) -> Result<Vec<Point3Js>, JsValue> {
+        let mut results: Vec<Point3Js> = Vec::new();
+        for span_a in self.inner.spans() {
+            for span_b in other.inner.spans() {
+                let its = span_a
+                    .find_intersection(span_b, None)
+                    .map_err(|e| JsValue::from_str(&format!("intersectCompound() failed on span pair: {:?}", e)))?;
+                for it in its {
+                    results.push(Point3Js::from(it.a().0.clone()));
+                }
+            }
+        }
+        Ok(results)
     }
 }
 

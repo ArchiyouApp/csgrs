@@ -319,6 +319,82 @@ impl<S: Clone + Send + Sync + Debug> Mesh<S> {
         hits
     }
 
+    /// Find all intersection points between a polyline (sequence of line segments)
+    /// and this Mesh's triangulated surface.
+    ///
+    /// Each consecutive pair of points in `polyline` defines a segment.
+    /// Every segment is tested against every triangle of the mesh.
+    ///
+    /// # Parameters
+    /// - `polyline`: ordered 3-D vertices; N points produce N-1 segments.
+    ///
+    /// # Returns
+    /// A `Vec` of intersection `Point3<Real>`, deduplicated and in
+    /// the order they appear along the polyline.
+    pub fn intersect_polyline(&self, polyline: &[Point3<Real>]) -> Vec<Point3<Real>> {
+        if polyline.len() < 2 {
+            return Vec::new();
+        }
+
+        let iso = Isometry3::identity();
+        let tol = tolerance();
+
+        // Pre-triangulate the mesh once
+        let triangles: Vec<[Vertex; 3]> = self
+            .polygons
+            .iter()
+            .flat_map(|poly| poly.triangulate())
+            .collect();
+
+        let mut hits: Vec<Point3<Real>> = Vec::new();
+
+        for seg in polyline.windows(2) {
+            let seg_start = seg[0];
+            let seg_end = seg[1];
+            let seg_dir = seg_end - seg_start;
+            let seg_len = seg_dir.norm();
+            if seg_len < tol {
+                continue;
+            }
+            let dir = seg_dir / seg_len; // unit direction
+            let ray = Ray::new(seg_start, dir);
+
+            let mut seg_hits: Vec<(Point3<Real>, Real)> = Vec::new();
+
+            for tri in &triangles {
+                let a = tri[0].position;
+                let b = tri[1].position;
+                let c = tri[2].position;
+                let triangle = Triangle::new(a, b, c);
+
+                if let Some(hit) = triangle.cast_ray_and_get_normal(&iso, &ray, seg_len + tol, true)
+                {
+                    let t = hit.time_of_impact;
+                    // Only accept hits within the segment length (with tolerance)
+                    if t >= -tol && t <= seg_len + tol {
+                        let point = Point3::from(ray.point_at(t).coords);
+                        seg_hits.push((point, t));
+                    }
+                }
+            }
+
+            // Sort this segment's hits by parameter
+            seg_hits.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            for (pt, _) in seg_hits {
+                // Deduplicate against the last added point
+                if let Some(last) = hits.last() {
+                    if (pt - last).norm() < tol {
+                        continue;
+                    }
+                }
+                hits.push(pt);
+            }
+        }
+
+        hits
+    }
+
     /// Convert the polygons in this Mesh to a Parry `TriMesh`, wrapped in a `SharedShape` to be used in Rapier.\
     /// Useful for collision detection or physics simulations.
     ///
