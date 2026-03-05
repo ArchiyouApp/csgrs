@@ -140,40 +140,80 @@ impl<S: Clone + Send + Sync> Polygon<S> {
 			return vec![[a, b, c]];
 		}
 
-        let normal_3d = self.plane.normal().normalize();
+        // Check for degenerate polygon: if the plane normal is zero-length,
+        // all vertices are collinear (or coincident) and cannot form triangles.
+        let raw_normal = self.plane.normal();
+        let normal_len = raw_normal.norm();
+        if normal_len < crate::float_types::tolerance() || !normal_len.is_finite() {
+            return Vec::new();
+        }
+
+        let normal_3d = raw_normal / normal_len;
+        // Guard against NaN (e.g. 0/0 from degenerate cross product)
+        if !normal_3d.x.is_finite() || !normal_3d.y.is_finite() || !normal_3d.z.is_finite() {
+            return Vec::new();
+        }
+
         let (u, v) = build_orthonormal_basis(normal_3d);
         let origin_3d = self.vertices[0].position;
 
         #[cfg(feature = "earcut")]
         {
 			use earcutr::earcut;
+
+			let n_verts = self.vertices.len();
 		
             // 1. Build flattened 2D coordinates, in the same order as `self.vertices`.
-			let mut flat_2d = Vec::with_capacity(self.vertices.len() * 2);
+			let mut flat_2d = Vec::with_capacity(n_verts * 2);
+			let mut has_nan = false;
 			for vert in &self.vertices {
 				let offset = vert.position.coords - origin_3d.coords;
 				let x = offset.dot(&u);
 				let y = offset.dot(&v);
+				if !x.is_finite() || !y.is_finite() {
+					has_nan = true;
+					break;
+				}
 				flat_2d.push(x);
 				flat_2d.push(y);
 			}
 
-			// 2. Run earcut: indices are into `flat_2d` as (x0, y0, x1, y1, …).
-			let holes: Vec<usize> = Vec::new(); // you said: no holes
-			let indices = earcut(&flat_2d, &holes, 2).expect("no triangle indices returned");
+			// If any 2D coordinate is NaN/Inf, bail out
+			if has_nan {
+				return Vec::new();
+			}
 
-			// 3. Build triangles using *original* vertices.
+			// 2. Run earcut; handle failure gracefully instead of panicking.
+			let holes: Vec<usize> = Vec::new(); // no holes
+			let indices = match earcut(&flat_2d, &holes, 2) {
+				Ok(indices) => indices,
+				Err(_) => return Vec::new(),
+			};
+
+			// 3. Build triangles using *original* vertices, validating indices.
 			let mut triangles = Vec::with_capacity(indices.len() / 3);
 			for tri in indices.chunks_exact(3) {
 				let i0 = tri[0] as usize;
 				let i1 = tri[1] as usize;
 				let i2 = tri[2] as usize;
 
+				// Guard against out-of-bounds indices from earcut
+				if i0 >= n_verts || i1 >= n_verts || i2 >= n_verts {
+					continue;
+				}
+
 				let a = self.vertices[i0];
 				let b = self.vertices[i1];
 				let c = self.vertices[i2];
 
-				triangles.push([a, b, c]); // reuse original triangle vertices without projection
+				// Skip degenerate (zero-area) triangles
+				let edge1 = b.position - a.position;
+				let edge2 = c.position - a.position;
+				if edge1.cross(&edge2).norm_squared() < crate::float_types::tolerance() * crate::float_types::tolerance() {
+					continue;
+				}
+
+				triangles.push([a, b, c]);
 			}
 
 			triangles
@@ -220,6 +260,51 @@ impl<S: Clone + Send + Sync> Polygon<S> {
                 return Vec::new();
             }
 
+            // Remove near-coincident consecutive vertices.
+            // Spade panics on zero-length constraint edges (duplicate points).
+            {
+                let eps2 = crate::float_types::tolerance() * crate::float_types::tolerance();
+                let mut deduped = Vec::with_capacity(all_vertices_2d.len());
+                for c in &all_vertices_2d {
+                    if let Some(prev) = deduped.last() {
+                        let prev: &geo::Coord<Real> = prev;
+                        let dx = c.x - prev.x;
+                        let dy = c.y - prev.y;
+                        if dx * dx + dy * dy < eps2 {
+                            continue; // skip near-duplicate
+                        }
+                    }
+                    deduped.push(*c);
+                }
+                // Also check wrap-around: last vs first
+                if deduped.len() > 1 {
+                    let first = deduped[0];
+                    let last = *deduped.last().unwrap();
+                    let dx = first.x - last.x;
+                    let dy = first.y - last.y;
+                    if dx * dx + dy * dy < eps2 {
+                        deduped.pop();
+                    }
+                }
+                all_vertices_2d = deduped;
+            }
+
+            if all_vertices_2d.len() < 3 {
+                return Vec::new();
+            }
+
+            // Check for degenerate 2D polygon: compute signed area.
+            // If |area| ≈ 0, the projected polygon is nearly collinear and cannot be triangulated.
+            let mut signed_area_2x: Real = 0.0;
+            for i in 0..all_vertices_2d.len() {
+                let j = (i + 1) % all_vertices_2d.len();
+                signed_area_2x += all_vertices_2d[i].x * all_vertices_2d[j].y
+                                - all_vertices_2d[j].x * all_vertices_2d[i].y;
+            }
+            if signed_area_2x.abs() < crate::float_types::tolerance() {
+                return Vec::new();
+            }
+
             // Build constrained Delaunay triangulation in Spade
 
             // Spade vertices
@@ -230,6 +315,34 @@ impl<S: Clone + Send + Sync> Polygon<S> {
 
             let n = vertices_spade.len();
             if n < 3 {
+                return Vec::new();
+            }
+
+            // Check for self-intersecting constraint edges, which cause spade to panic.
+            // For a simple polygon ring [0→1→2→…→n-1→0], check if any non-adjacent
+            // edges intersect.
+            let has_self_intersection = {
+                let mut found = false;
+                'outer: for i in 0..n {
+                    let a1 = &all_vertices_2d[i];
+                    let b1 = &all_vertices_2d[(i + 1) % n];
+                    // Only check edges that are not adjacent to edge i
+                    for j in (i + 2)..n {
+                        if i == 0 && j == n - 1 {
+                            continue; // these two edges share vertex 0
+                        }
+                        let a2 = &all_vertices_2d[j];
+                        let b2 = &all_vertices_2d[(j + 1) % n];
+                        if segments_intersect_2d(a1.x, a1.y, b1.x, b1.y, a2.x, a2.y, b2.x, b2.y)
+                        {
+                            found = true;
+                            break 'outer;
+                        }
+                    }
+                }
+                found
+            };
+            if has_self_intersection {
                 return Vec::new();
             }
 
@@ -250,18 +363,29 @@ impl<S: Clone + Send + Sync> Polygon<S> {
                 }
             };
 
-            // Refine the CDT with a 20° angle limit
-            let refinement = RefinementParameters::<Real>::new()
-                .with_angle_limit(AngleLimit::from_deg(5.0))
-                // never insert steiner points on edges, so that we don't introduce new T junctions
-                .keep_constraint_edges()
-                // our polygon forms a closed shape; this makes refinement ignore
-                // faces outside the polygon when deciding where to insert Steiner points
-                .exclude_outer_faces(true);
+            // Refine the CDT — skip refinement for very thin polygons
+            // (aspect ratio check: compare area to perimeter² to detect slivers)
+            let perimeter: Real = {
+                let mut p: Real = 0.0;
+                for i in 0..all_vertices_2d.len() {
+                    let j = (i + 1) % all_vertices_2d.len();
+                    let dx = all_vertices_2d[j].x - all_vertices_2d[i].x;
+                    let dy = all_vertices_2d[j].y - all_vertices_2d[i].y;
+                    p += (dx * dx + dy * dy).sqrt();
+                }
+                p
+            };
+            // For a circle, area/perimeter² ≈ 1/(4π) ≈ 0.08.
+            // For a very thin polygon, this ratio → 0. Skip refinement for slivers.
+            let compactness = signed_area_2x.abs() / (perimeter * perimeter + crate::float_types::tolerance());
+            if compactness > 1e-6 {
+                let refinement = RefinementParameters::<Real>::new()
+                    .with_angle_limit(AngleLimit::from_deg(5.0))
+                    .keep_constraint_edges()
+                    .exclude_outer_faces(true);
 
-            let _result = cdt.refine(refinement);
-            // We should inspect `_result.refinement_complete`
-            // and react if refinement ran out of additional vertices.
+                let _result = cdt.refine(refinement);
+            }
 
             // Extract triangles back out of Spade and lift to 3D
             let mut final_triangles = Vec::new();
@@ -283,6 +407,13 @@ impl<S: Clone + Send + Sync> Polygon<S> {
                     let p = v_handle.position(); // &Point2<Real>
                     let pos_3d = origin_3d.coords + p.x * u + p.y * v;
                     tri_vertices[k] = Vertex::new(Point3::from(pos_3d), normal_3d);
+                }
+
+                // Skip degenerate (zero-area) triangles
+                let edge1 = tri_vertices[1].position - tri_vertices[0].position;
+                let edge2 = tri_vertices[2].position - tri_vertices[0].position;
+                if edge1.cross(&edge2).norm_squared() < crate::float_types::tolerance() * crate::float_types::tolerance() {
+                    continue;
                 }
                 
                 final_triangles.push(tri_vertices);
@@ -479,4 +610,30 @@ pub fn subdivide_triangle(tri: [Vertex; 3]) -> Vec<[Vertex; 3]> {
         [v20, v12, tri[2]],
         [v01, v12, v20],
     ]
+}
+
+/// Test whether two 2D line segments (a1→b1) and (a2→b2) properly intersect
+/// (cross each other, ignoring shared endpoints).
+fn segments_intersect_2d(
+    ax1: Real, ay1: Real, bx1: Real, by1: Real,
+    ax2: Real, ay2: Real, bx2: Real, by2: Real,
+) -> bool {
+    let d1x = bx1 - ax1;
+    let d1y = by1 - ay1;
+    let d2x = bx2 - ax2;
+    let d2y = by2 - ay2;
+
+    let denom = d1x * d2y - d1y * d2x;
+    if denom.abs() < 1e-12 {
+        return false; // parallel or collinear — treat as non-intersecting
+    }
+
+    let dx = ax2 - ax1;
+    let dy = ay2 - ay1;
+    let t = (dx * d2y - dy * d2x) / denom;
+    let u = (dx * d1y - dy * d1x) / denom;
+
+    // Strict interior intersection (excluding endpoints)
+    let eps = 1e-10;
+    t > eps && t < 1.0 - eps && u > eps && u < 1.0 - eps
 }

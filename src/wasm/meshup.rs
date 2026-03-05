@@ -7,7 +7,8 @@ use nalgebra::{ Point3, Point4, Rotation3, Translation3, Matrix4, Vector3 };
 use curvo::prelude::{ NurbsCurve2D, NurbsCurve3D, CompoundCurve2D, Tessellation, BoundingBox, Transformable,
         CompoundCurve3D, Fillet, FilletRadiusOption, FilletRadiusParameterOption,
         CurveOffsetOption, CurveOffsetCornerType, Offset, Intersects, HasIntersection,
-        TrimRange, Split };
+        TrimRange, Split, Boolean, Clip };
+use curvo::prelude::operation::BooleanOperation;
 
 use super::point_js::{ Point3Js };
 use super::vector_js::{ Vector3Js };
@@ -661,6 +662,59 @@ impl NurbsCurve3DJs
         Ok(results)
     }
 
+    //// BOOLEAN OPERATIONS ////
+
+    /// Perform a boolean operation (union / intersection / difference) with another NurbsCurve3D.
+    /// Both curves must be planar and coplanar. The operation is performed in 2D
+    /// and the result is projected back to 3D.
+    /// Returns the exterior curves of the resulting regions as CompoundCurve3DJs.
+    #[wasm_bindgen(js_name = booleanCurve)]
+    pub fn boolean_curve(&self, other: &NurbsCurve3DJs, operation: &str) -> Result<Vec<CompoundCurve3DJs>, JsValue> {
+        let op = parse_boolean_operation(operation)?;
+        let (origin, local_x, local_y) = get_plane_from_nurbs(self)?;
+
+        let mut self_2d = self.project_to_2d(&origin, &local_x, &local_y)
+            .map_err(|e| JsValue::from_str(&e))?;
+        let mut other_2d = other.project_to_2d(&origin, &local_x, &local_y)
+            .map_err(|e| JsValue::from_str(&e))?;
+
+        ensure_closed_nurbs_2d(&mut self_2d, 1e-8);
+        ensure_closed_nurbs_2d(&mut other_2d, 1e-8);
+
+        let clip = self_2d.boolean(op, &other_2d, None)
+            .map_err(|e| JsValue::from_str(&format!("booleanCurve({}) failed: {:?}", operation, e)))?;
+
+        clip_regions_to_3d(clip, &origin, &local_x, &local_y)
+    }
+
+    /// Perform a boolean operation (union / intersection / difference) with a CompoundCurve3D.
+    /// Both curves must be planar and coplanar. The operation is performed in 2D
+    /// and the result is projected back to 3D.
+    /// Returns the exterior curves of the resulting regions as CompoundCurve3DJs.
+    #[wasm_bindgen(js_name = booleanCompoundCurve)]
+    pub fn boolean_compound_curve(&self, other: &CompoundCurve3DJs, operation: &str) -> Result<Vec<CompoundCurve3DJs>, JsValue> {
+        let op = parse_boolean_operation(operation)?;
+        let (origin, local_x, local_y) = get_plane_from_nurbs(self)?;
+
+        let mut self_2d = self.project_to_2d(&origin, &local_x, &local_y)
+            .map_err(|e| JsValue::from_str(&e))?;
+        let other_2d = other.project_to_2d(&origin, &local_x, &local_y)
+            .map_err(|e| JsValue::from_str(&e))?;
+
+        ensure_closed_nurbs_2d(&mut self_2d, 1e-8);
+        let other_2d = ensure_closed_compound_2d(other_2d, 1e-8)
+            .map_err(|e| JsValue::from_str(&e))?;
+
+        // Wrap single NurbsCurve2D into a CompoundCurve2D so we can use compound vs compound boolean
+        let self_compound_2d = CompoundCurve2D::try_new(vec![self_2d])
+            .map_err(|e| JsValue::from_str(&format!("Failed to wrap curve as compound: {:?}", e)))?;
+
+        let clip = self_compound_2d.boolean(op, &other_2d, None)
+            .map_err(|e| JsValue::from_str(&format!("booleanCompoundCurve({}) failed: {:?}", operation, e)))?;
+
+        clip_regions_to_3d(clip, &origin, &local_x, &local_y)
+    }
+
 }
 
 ///// NURBSCURVE3DJS NON-WASM  ////
@@ -789,8 +843,6 @@ impl CompoundCurve3DJs
 
         points
     }
-
-    
 
     #[wasm_bindgen(js_name = knotsDomain)]
     pub fn knots_domain(&self) -> Vec<Real> {
@@ -1100,6 +1152,57 @@ impl CompoundCurve3DJs
         }
         Ok(results)
     }
+
+    //// BOOLEAN OPERATIONS ////
+
+    /// Perform a boolean operation (union / intersection / difference) with a NurbsCurve3D.
+    /// Both curves must be planar and coplanar. The operation is performed in 2D
+    /// and the result is projected back to 3D.
+    /// Returns the exterior curves of the resulting regions as CompoundCurve3DJs.
+    #[wasm_bindgen(js_name = booleanCurve)]
+    pub fn boolean_curve(&self, other: &NurbsCurve3DJs, operation: &str) -> Result<Vec<CompoundCurve3DJs>, JsValue> {
+        let op = parse_boolean_operation(operation)?;
+        let (origin, local_x, local_y) = get_plane_from_compound(self)?;
+
+        let self_2d = self.project_to_2d(&origin, &local_x, &local_y)
+            .map_err(|e| JsValue::from_str(&e))?;
+        let mut other_2d = other.project_to_2d(&origin, &local_x, &local_y)
+            .map_err(|e| JsValue::from_str(&e))?;
+
+        let self_2d = ensure_closed_compound_2d(self_2d, 1e-8)
+            .map_err(|e| JsValue::from_str(&e))?;
+        ensure_closed_nurbs_2d(&mut other_2d, 1e-8);
+
+        let clip = self_2d.boolean(op, &other_2d, None)
+            .map_err(|e| JsValue::from_str(&format!("booleanCurve({}) failed: {:?}", operation, e)))?;
+
+        clip_regions_to_3d(clip, &origin, &local_x, &local_y)
+    }
+
+    /// Perform a boolean operation (union / intersection / difference) with another CompoundCurve3D.
+    /// Both curves must be planar and coplanar. The operation is performed in 2D
+    /// and the result is projected back to 3D.
+    /// Returns the exterior curves of the resulting regions as CompoundCurve3DJs.
+    #[wasm_bindgen(js_name = booleanCompoundCurve)]
+    pub fn boolean_compound_curve(&self, other: &CompoundCurve3DJs, operation: &str) -> Result<Vec<CompoundCurve3DJs>, JsValue> {
+        let op = parse_boolean_operation(operation)?;
+        let (origin, local_x, local_y) = get_plane_from_compound(self)?;
+
+        let self_2d = self.project_to_2d(&origin, &local_x, &local_y)
+            .map_err(|e| JsValue::from_str(&e))?;
+        let other_2d = other.project_to_2d(&origin, &local_x, &local_y)
+            .map_err(|e| JsValue::from_str(&e))?;
+
+        let self_2d = ensure_closed_compound_2d(self_2d, 1e-8)
+            .map_err(|e| JsValue::from_str(&e))?;
+        let other_2d = ensure_closed_compound_2d(other_2d, 1e-8)
+            .map_err(|e| JsValue::from_str(&e))?;
+
+        let clip = self_2d.boolean(op, &other_2d, None)
+            .map_err(|e| JsValue::from_str(&format!("booleanCompoundCurve({}) failed: {:?}", operation, e)))?;
+
+        clip_regions_to_3d(clip, &origin, &local_x, &local_y)
+    }
 }
 
 // COMPOUND CURVE3D JS - NON-WASM
@@ -1128,3 +1231,114 @@ impl From<CompoundCurve3D<Real>> for CompoundCurve3DJs {
 }
 
 
+//// HELPERS ////
+
+/// Parse a boolean operation string ("union", "intersection", "difference") into a BooleanOperation enum.
+fn parse_boolean_operation(op: &str) -> Result<BooleanOperation, JsValue> {
+    match op {
+        "union" => Ok(BooleanOperation::Union),
+        "intersection" => Ok(BooleanOperation::Intersection),
+        "difference" => Ok(BooleanOperation::Difference),
+        _ => Err(JsValue::from_str(&format!("Unknown boolean operation: '{}'. Use 'union', 'intersection', or 'difference'.", op))),
+    }
+}
+
+/// Extract the projection plane (origin, local_x, local_y) from a NurbsCurve3DJs.
+/// Fails if the curve is not planar.
+fn get_plane_from_nurbs(curve: &NurbsCurve3DJs) -> Result<(Point3<Real>, Vector3<Real>, Vector3<Real>), JsValue> {
+    let plane = curve.get_on_plane(None);
+    if plane.len() != 3 {
+        return Err(JsValue::from_str("Cannot perform boolean on non-planar curve"));
+    }
+    let local_x: Vector3<Real> = (&plane[1]).into();
+    let local_y: Vector3<Real> = (&plane[2]).into();
+    let first_cp = curve.inner.control_points()[0];
+    let w = first_cp.w;
+    let origin = Point3::new(first_cp.x / w, first_cp.y / w, first_cp.z / w);
+    Ok((origin, local_x, local_y))
+}
+
+/// Extract the projection plane (origin, local_x, local_y) from a CompoundCurve3DJs
+/// by inspecting its first span. Fails if not planar.
+fn get_plane_from_compound(curve: &CompoundCurve3DJs) -> Result<(Point3<Real>, Vector3<Real>, Vector3<Real>), JsValue> {
+    let spans = curve.inner.clone().into_spans();
+    if spans.is_empty() {
+        return Err(JsValue::from_str("Cannot perform boolean on empty compound curve"));
+    }
+    let first_span = NurbsCurve3DJs { inner: spans[0].clone() };
+    get_plane_from_nurbs(&first_span)
+}
+
+/// Snap the last control point of a NurbsCurve2D to the first if they are within `tol`.
+/// This fixes floating-point closure gaps (e.g. from NURBS circles).
+fn ensure_closed_nurbs_2d(curve: &mut NurbsCurve2D<Real>, tol: Real) {
+    let n = curve.control_points().len();
+    if n < 2 { return; }
+    let first = curve.control_points()[0];
+    let last = curve.control_points()[n - 1];
+    // Dehomogenize: 2D NURBS control point is (x*w, y*w, w)
+    let w0 = first.z;
+    let w1 = last.z;
+    let dx = first.x / w0 - last.x / w1;
+    let dy = first.y / w0 - last.y / w1;
+    if (dx * dx + dy * dy).sqrt() < tol {
+        if let Some(p) = curve.control_points_iter_mut().nth(n - 1) {
+            *p = first;
+        }
+    }
+}
+
+/// Snap the endpoint of a CompoundCurve2D's last span to the startpoint of the first span
+/// if they are within `tol`. Returns the (possibly modified) CompoundCurve2D.
+fn ensure_closed_compound_2d(compound: CompoundCurve2D<Real>, tol: Real) -> Result<CompoundCurve2D<Real>, String> {
+    let mut spans: Vec<NurbsCurve2D<Real>> = compound.into_spans();
+    if spans.is_empty() {
+        return CompoundCurve2D::try_new(spans)
+            .map_err(|e| format!("Failed to recreate empty compound curve: {:?}", e));
+    }
+    // Get first control point of first span
+    let first_cp = spans[0].control_points()[0];
+    // Snap last control point of last span
+    let last_span = spans.last_mut().unwrap();
+    let n = last_span.control_points().len();
+    if n >= 2 {
+        let last_cp = last_span.control_points()[n - 1];
+        let w0 = first_cp.z;
+        let w1 = last_cp.z;
+        let dx = first_cp.x / w0 - last_cp.x / w1;
+        let dy = first_cp.y / w0 - last_cp.y / w1;
+        if (dx * dx + dy * dy).sqrt() < tol {
+            if let Some(p) = last_span.control_points_iter_mut().nth(n - 1) {
+                *p = first_cp;
+            }
+        }
+    }
+    CompoundCurve2D::try_new(spans)
+        .map_err(|e| format!("Failed to close compound curve: {:?}", e))
+}
+
+/// Convert a 2D Clip result back to 3D CompoundCurve3DJs.
+/// Each Region's exterior CompoundCurve2D is projected back into 3D.
+fn clip_regions_to_3d(
+    clip: Clip<Real>,
+    origin: &Point3<Real>,
+    local_x: &Vector3<Real>,
+    local_y: &Vector3<Real>,
+) -> Result<Vec<CompoundCurve3DJs>, JsValue> {
+    let mut results: Vec<CompoundCurve3DJs> = Vec::new();
+    for region in clip.into_regions() {
+        let exterior_2d = region.into_exterior();
+        let mut spans_3d: Vec<NurbsCurve3D<Real>> = Vec::new();
+        for span_2d in exterior_2d.spans() {
+            let curve_3d = NurbsCurve3DJs::from_2d(span_2d, origin, local_x, local_y)
+                .map_err(|e| JsValue::from_str(&e))?;
+            spans_3d.push(curve_3d.inner);
+        }
+        if !spans_3d.is_empty() {
+            let compound = CompoundCurve3D::try_new(spans_3d)
+                .map_err(|e| JsValue::from_str(&format!("Failed to create compound curve from boolean result: {:?}", e)))?;
+            results.push(CompoundCurve3DJs::from(compound));
+        }
+    }
+    Ok(results)
+}
