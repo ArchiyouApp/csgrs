@@ -38,6 +38,42 @@ impl PolygonJs {
         }
     }
 
+    /// Get the holes as an array of `VertexJs[][]`.
+    #[wasm_bindgen(js_name = holes)]
+    pub fn holes(&self) -> JsValue {
+        let outer_arr = js_sys::Array::new();
+
+        for hole in &self.inner.holes {
+            let inner_arr = js_sys::Array::new();
+            for v in hole {
+                let js_vert = VertexJs { inner: v.clone() };
+                inner_arr.push(&JsValue::from(js_vert));
+            }
+            outer_arr.push(&inner_arr.into());
+        }
+
+        outer_arr.into()
+    }
+
+    /// Returns `true` if this polygon has interior holes.
+    #[wasm_bindgen(js_name = hasHoles)]
+    pub fn has_holes(&self) -> bool {
+        !self.inner.holes.is_empty()
+    }
+
+    /// Number of holes.
+    #[wasm_bindgen(js_name = holeCount)]
+    pub fn hole_count(&self) -> usize {
+        self.inner.holes.len()
+    }
+
+    /// Add a hole defined by vertices.
+    #[wasm_bindgen(js_name = addHole)]
+    pub fn add_hole(&mut self, hole_vertices: Vec<VertexJs>) {
+        let verts: Vec<Vertex> = hole_vertices.into_iter().map(|v| v.inner).collect();
+        self.inner.holes.push(verts);
+    }
+
     /// Get the vertices as `VertexJs[]`.
     #[wasm_bindgen(js_name = vertices)]
     pub fn vertices(&self) -> JsValue {

@@ -7,7 +7,7 @@ use nalgebra::{ Point3, Point4, Rotation3, Translation3, Matrix4, Vector3 };
 use curvo::prelude::{ NurbsCurve2D, NurbsCurve3D, CompoundCurve2D, Tessellation, BoundingBox, Transformable,
         CompoundCurve3D, Fillet, FilletRadiusOption, FilletRadiusParameterOption,
         CurveOffsetOption, CurveOffsetCornerType, Offset, Intersects, HasIntersection,
-        TrimRange, Split, Boolean, Clip };
+        TrimRange, Split, Boolean, Clip, Invertible };
 use curvo::prelude::operation::BooleanOperation;
 
 use super::point_js::{ Point3Js };
@@ -461,6 +461,12 @@ impl NurbsCurve3DJs
     }
     
 
+    /// Reverse the direction of this curve (swap start/end).
+    /// Returns a new reversed copy.
+    pub fn reverse(&self) -> NurbsCurve3DJs {
+        NurbsCurve3DJs { inner: self.inner.inverse() }
+    }
+
     /// Rotate the curve by Euler angles (in radians) around the X, Y, and Z axes
     pub fn rotate(&self, ax: Real, ay: Real, az: Real) -> NurbsCurve3DJs {
         let rotation = Rotation3::from_euler_angles(ax, ay, az);
@@ -667,9 +673,9 @@ impl NurbsCurve3DJs
     /// Perform a boolean operation (union / intersection / difference) with another NurbsCurve3D.
     /// Both curves must be planar and coplanar. The operation is performed in 2D
     /// and the result is projected back to 3D.
-    /// Returns the exterior curves of the resulting regions as CompoundCurve3DJs.
+    /// Returns BooleanRegionJs results containing exterior curves and interior holes.
     #[wasm_bindgen(js_name = booleanCurve)]
-    pub fn boolean_curve(&self, other: &NurbsCurve3DJs, operation: &str) -> Result<Vec<CompoundCurve3DJs>, JsValue> {
+    pub fn boolean_curve(&self, other: &NurbsCurve3DJs, operation: &str) -> Result<Vec<BooleanRegionJs>, JsValue> {
         let op = parse_boolean_operation(operation)?;
         let (origin, local_x, local_y) = get_plane_from_nurbs(self)?;
 
@@ -690,9 +696,9 @@ impl NurbsCurve3DJs
     /// Perform a boolean operation (union / intersection / difference) with a CompoundCurve3D.
     /// Both curves must be planar and coplanar. The operation is performed in 2D
     /// and the result is projected back to 3D.
-    /// Returns the exterior curves of the resulting regions as CompoundCurve3DJs.
+    /// Returns BooleanRegionJs results containing exterior curves and interior holes.
     #[wasm_bindgen(js_name = booleanCompoundCurve)]
-    pub fn boolean_compound_curve(&self, other: &CompoundCurve3DJs, operation: &str) -> Result<Vec<CompoundCurve3DJs>, JsValue> {
+    pub fn boolean_compound_curve(&self, other: &CompoundCurve3DJs, operation: &str) -> Result<Vec<BooleanRegionJs>, JsValue> {
         let op = parse_boolean_operation(operation)?;
         let (origin, local_x, local_y) = get_plane_from_nurbs(self)?;
 
@@ -788,6 +794,43 @@ impl From<NurbsCurve3D<Real>> for NurbsCurve3DJs {
     }
 }
 
+
+//// BOOLEAN REGION JS ////
+
+/// Result of a boolean operation: an exterior boundary curve with zero or more interior hole curves.
+/// Each region from a Clip result is represented as one BooleanRegionJs.
+#[wasm_bindgen]
+pub struct BooleanRegionJs {
+    exterior: CompoundCurve3D<Real>,
+    holes: Vec<CompoundCurve3D<Real>>,
+}
+
+#[wasm_bindgen]
+impl BooleanRegionJs {
+    /// Get the exterior boundary curve of this region
+    #[wasm_bindgen(getter)]
+    pub fn exterior(&self) -> CompoundCurve3DJs {
+        CompoundCurve3DJs { inner: self.exterior.clone() }
+    }
+
+    /// Get the interior hole curves of this region
+    #[wasm_bindgen(getter)]
+    pub fn holes(&self) -> Vec<CompoundCurve3DJs> {
+        self.holes.iter().map(|h| CompoundCurve3DJs { inner: h.clone() }).collect()
+    }
+
+    /// Number of interior holes
+    #[wasm_bindgen(js_name = holeCount)]
+    pub fn hole_count(&self) -> usize {
+        self.holes.len()
+    }
+
+    /// Whether this region has any interior holes
+    #[wasm_bindgen(js_name = hasHoles)]
+    pub fn has_holes(&self) -> bool {
+        !self.holes.is_empty()
+    }
+}
 
 //// COMPOUNDCURVE3DJS ////
 
@@ -899,6 +942,12 @@ impl CompoundCurve3DJs
 
     //// OPERATIONS ////
     
+    /// Reverse the direction of the compound curve (swap start/end).
+    /// Returns a new reversed copy.
+    pub fn reverse(&self) -> CompoundCurve3DJs {
+        CompoundCurve3DJs { inner: self.inner.inverse() }
+    }
+
     /// Translate the compound curve by a Vector3Js offset
     #[wasm_bindgen(js_name = translate)]
     pub fn translate(&self, offset: &Vector3Js) -> CompoundCurve3DJs {
@@ -1158,9 +1207,9 @@ impl CompoundCurve3DJs
     /// Perform a boolean operation (union / intersection / difference) with a NurbsCurve3D.
     /// Both curves must be planar and coplanar. The operation is performed in 2D
     /// and the result is projected back to 3D.
-    /// Returns the exterior curves of the resulting regions as CompoundCurve3DJs.
+    /// Returns BooleanRegionJs results containing exterior curves and interior holes.
     #[wasm_bindgen(js_name = booleanCurve)]
-    pub fn boolean_curve(&self, other: &NurbsCurve3DJs, operation: &str) -> Result<Vec<CompoundCurve3DJs>, JsValue> {
+    pub fn boolean_curve(&self, other: &NurbsCurve3DJs, operation: &str) -> Result<Vec<BooleanRegionJs>, JsValue> {
         let op = parse_boolean_operation(operation)?;
         let (origin, local_x, local_y) = get_plane_from_compound(self)?;
 
@@ -1182,9 +1231,9 @@ impl CompoundCurve3DJs
     /// Perform a boolean operation (union / intersection / difference) with another CompoundCurve3D.
     /// Both curves must be planar and coplanar. The operation is performed in 2D
     /// and the result is projected back to 3D.
-    /// Returns the exterior curves of the resulting regions as CompoundCurve3DJs.
+    /// Returns BooleanRegionJs results containing exterior curves and interior holes.
     #[wasm_bindgen(js_name = booleanCompoundCurve)]
-    pub fn boolean_compound_curve(&self, other: &CompoundCurve3DJs, operation: &str) -> Result<Vec<CompoundCurve3DJs>, JsValue> {
+    pub fn boolean_compound_curve(&self, other: &CompoundCurve3DJs, operation: &str) -> Result<Vec<BooleanRegionJs>, JsValue> {
         let op = parse_boolean_operation(operation)?;
         let (origin, local_x, local_y) = get_plane_from_compound(self)?;
 
@@ -1317,28 +1366,52 @@ fn ensure_closed_compound_2d(compound: CompoundCurve2D<Real>, tol: Real) -> Resu
         .map_err(|e| format!("Failed to close compound curve: {:?}", e))
 }
 
-/// Convert a 2D Clip result back to 3D CompoundCurve3DJs.
-/// Each Region's exterior CompoundCurve2D is projected back into 3D.
+/// Convert a 2D Clip result back to 3D BooleanRegionJs.
+/// Each Region's exterior and interior holes are projected back into 3D.
 fn clip_regions_to_3d(
     clip: Clip<Real>,
     origin: &Point3<Real>,
     local_x: &Vector3<Real>,
     local_y: &Vector3<Real>,
-) -> Result<Vec<CompoundCurve3DJs>, JsValue> {
-    let mut results: Vec<CompoundCurve3DJs> = Vec::new();
+) -> Result<Vec<BooleanRegionJs>, JsValue> {
+    let mut results: Vec<BooleanRegionJs> = Vec::new();
     for region in clip.into_regions() {
-        let exterior_2d = region.into_exterior();
-        let mut spans_3d: Vec<NurbsCurve3D<Real>> = Vec::new();
+        // Decompose region into exterior and interior holes
+        let (exterior_2d, interiors_2d) = region.into_tuple();
+
+        // Project exterior to 3D
+        let mut ext_spans_3d: Vec<NurbsCurve3D<Real>> = Vec::new();
         for span_2d in exterior_2d.spans() {
             let curve_3d = NurbsCurve3DJs::from_2d(span_2d, origin, local_x, local_y)
                 .map_err(|e| JsValue::from_str(&e))?;
-            spans_3d.push(curve_3d.inner);
+            ext_spans_3d.push(curve_3d.inner);
         }
-        if !spans_3d.is_empty() {
-            let compound = CompoundCurve3D::try_new(spans_3d)
-                .map_err(|e| JsValue::from_str(&format!("Failed to create compound curve from boolean result: {:?}", e)))?;
-            results.push(CompoundCurve3DJs::from(compound));
+        if ext_spans_3d.is_empty() {
+            continue;
         }
+        let exterior_3d = CompoundCurve3D::try_new(ext_spans_3d)
+            .map_err(|e| JsValue::from_str(&format!("Failed to create compound curve from boolean result exterior: {:?}", e)))?;
+
+        // Project each interior hole to 3D
+        let mut holes_3d: Vec<CompoundCurve3D<Real>> = Vec::new();
+        for hole_2d in &interiors_2d {
+            let mut hole_spans_3d: Vec<NurbsCurve3D<Real>> = Vec::new();
+            for span_2d in hole_2d.spans() {
+                let curve_3d = NurbsCurve3DJs::from_2d(span_2d, origin, local_x, local_y)
+                    .map_err(|e| JsValue::from_str(&e))?;
+                hole_spans_3d.push(curve_3d.inner);
+            }
+            if !hole_spans_3d.is_empty() {
+                let hole_compound = CompoundCurve3D::try_new(hole_spans_3d)
+                    .map_err(|e| JsValue::from_str(&format!("Failed to create compound curve from boolean result hole: {:?}", e)))?;
+                holes_3d.push(hole_compound);
+            }
+        }
+
+        results.push(BooleanRegionJs {
+            exterior: exterior_3d,
+            holes: holes_3d,
+        });
     }
     Ok(results)
 }

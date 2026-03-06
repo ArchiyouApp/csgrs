@@ -1,4 +1,4 @@
-//! Struct and functions for working with planar `Polygon`s without holes
+//! Struct and functions for working with planar `Polygon`s, optionally with interior holes
 
 use crate::float_types::{Real, parry3d::bounding_volume::Aabb};
 use crate::mesh::plane::Plane;
@@ -6,12 +6,15 @@ use crate::vertex::Vertex;
 use nalgebra::{Point3, Vector3};
 use std::sync::OnceLock;
 
-/// A polygon, defined by a list of vertices.
+/// A polygon, defined by a list of vertices and optional interior holes.
 /// - `S` is the generic metadata type, stored as `Option<S>`.
 #[derive(Debug, Clone)]
 pub struct Polygon<S: Clone> {
-    /// Vertices defining the Polygon's shape
+    /// Vertices defining the Polygon's outer boundary
     pub vertices: Vec<Vertex>,
+
+    /// Optional interior hole boundaries (each hole is a list of vertices)
+    pub holes: Vec<Vec<Vertex>>,
 
     /// The plane on which this Polygon lies, used for splitting
     pub plane: Plane,
@@ -39,7 +42,7 @@ impl<S: Clone + Send + Sync + PartialEq> Polygon<S> {
 }
 
 impl<S: Clone + Send + Sync> Polygon<S> {
-    /// Create a polygon from vertices
+    /// Create a polygon from vertices (no holes)
     pub fn new(vertices: Vec<Vertex>, metadata: Option<S>) -> Self {
         assert!(vertices.len() >= 3, "degenerate polygon");
 
@@ -47,6 +50,23 @@ impl<S: Clone + Send + Sync> Polygon<S> {
 
         Polygon {
             vertices,
+            holes: Vec::new(),
+            plane,
+            bounding_box: OnceLock::new(),
+            metadata,
+        }
+    }
+
+    /// Create a polygon from vertices with interior holes.
+    /// Each hole is a list of vertices defining an interior boundary.
+    pub fn new_with_holes(vertices: Vec<Vertex>, holes: Vec<Vec<Vertex>>, metadata: Option<S>) -> Self {
+        assert!(vertices.len() >= 3, "degenerate polygon");
+
+        let plane = Plane::from_vertices(vertices.clone());
+
+        Polygon {
+            vertices,
+            holes,
             plane,
             bounding_box: OnceLock::new(),
             metadata,
@@ -72,13 +92,20 @@ impl<S: Clone + Send + Sync> Polygon<S> {
 
     /// Reverses winding order, flips vertices normals, and flips the plane normal
     pub fn flip(&mut self) {
-        // 1) reverse vertices
+        // 1) reverse outer vertices
         self.vertices.reverse();
-        // 2) flip all vertex normals
+        // 2) flip all outer vertex normals
         for v in &mut self.vertices {
             v.flip();
         }
-        // 3) flip the cached plane too
+        // 3) reverse and flip hole vertices
+        for hole in &mut self.holes {
+            hole.reverse();
+            for v in hole {
+                v.flip();
+            }
+        }
+        // 4) flip the cached plane too
         self.plane.flip();
     }
 
@@ -161,12 +188,18 @@ impl<S: Clone + Send + Sync> Polygon<S> {
         {
 			use earcutr::earcut;
 
-			let n_verts = self.vertices.len();
-		
-            // 1. Build flattened 2D coordinates, in the same order as `self.vertices`.
-			let mut flat_2d = Vec::with_capacity(n_verts * 2);
+			// Build a combined vertex list: outer vertices + all hole vertices.
+			// This lets us map earcut indices back to original 3D Vertex data.
+			let mut all_verts: Vec<Vertex> = self.vertices.clone();
+			for hole in &self.holes {
+				all_verts.extend(hole.iter().cloned());
+			}
+			let total_verts = all_verts.len();
+
+            // 1. Build flattened 2D coordinates for outer ring.
+			let mut flat_2d = Vec::with_capacity(total_verts * 2);
 			let mut has_nan = false;
-			for vert in &self.vertices {
+			for vert in &all_verts {
 				let offset = vert.position.coords - origin_3d.coords;
 				let x = offset.dot(&u);
 				let y = offset.dot(&v);
@@ -183,14 +216,22 @@ impl<S: Clone + Send + Sync> Polygon<S> {
 				return Vec::new();
 			}
 
-			// 2. Run earcut; handle failure gracefully instead of panicking.
-			let holes: Vec<usize> = Vec::new(); // no holes
-			let indices = match earcut(&flat_2d, &holes, 2) {
+			// 2. Build hole_indices: for each hole, the index of its first vertex
+			//    in the combined flat_2d array (in terms of vertex count, not floats).
+			let mut hole_indices: Vec<usize> = Vec::new();
+			let mut offset_idx = self.vertices.len();
+			for hole in &self.holes {
+				hole_indices.push(offset_idx);
+				offset_idx += hole.len();
+			}
+
+			// 3. Run earcut; handle failure gracefully instead of panicking.
+			let indices = match earcut(&flat_2d, &hole_indices, 2) {
 				Ok(indices) => indices,
 				Err(_) => return Vec::new(),
 			};
 
-			// 3. Build triangles using *original* vertices, validating indices.
+			// 4. Build triangles using combined vertex list, validating indices.
 			let mut triangles = Vec::with_capacity(indices.len() / 3);
 			for tri in indices.chunks_exact(3) {
 				let i0 = tri[0] as usize;
@@ -198,13 +239,13 @@ impl<S: Clone + Send + Sync> Polygon<S> {
 				let i2 = tri[2] as usize;
 
 				// Guard against out-of-bounds indices from earcut
-				if i0 >= n_verts || i1 >= n_verts || i2 >= n_verts {
+				if i0 >= total_verts || i1 >= total_verts || i2 >= total_verts {
 					continue;
 				}
 
-				let a = self.vertices[i0];
-				let b = self.vertices[i1];
-				let c = self.vertices[i2];
+				let a = all_verts[i0];
+				let b = all_verts[i1];
+				let c = all_verts[i2];
 
 				// Skip degenerate (zero-area) triangles
 				let edge1 = b.position - a.position;
@@ -221,6 +262,83 @@ impl<S: Clone + Send + Sync> Polygon<S> {
 
         #[cfg(feature = "delaunay")]
         {
+            // ── When holes are present, delegate to geo's constrained_triangulation
+            //    which properly classifies interior vs. exterior faces. ──
+            if !self.holes.is_empty() {
+                use geo::{coord, LineString as GeoLineString, Polygon as GeoPolygon, TriangulateSpade};
+
+                #[allow(clippy::excessive_precision)]
+                const MIN_ALLOWED_VALUE: Real = 1.793662034335766e-43;
+
+                // Helper: project a ring of Vertex to 2D Coords
+                let project_ring = |ring: &[Vertex]| -> Vec<geo::Coord<Real>> {
+                    ring.iter()
+                        .filter_map(|vert| {
+                            let offset = vert.position.coords - origin_3d.coords;
+                            let x = offset.dot(&u);
+                            let y = offset.dot(&v);
+                            if !x.is_finite() || !y.is_finite() {
+                                return None;
+                            }
+                            let x_c = if x.abs() < MIN_ALLOWED_VALUE { 0.0 } else { x };
+                            let y_c = if y.abs() < MIN_ALLOWED_VALUE { 0.0 } else { y };
+                            Some(coord! { x: x_c, y: y_c })
+                        })
+                        .collect()
+                };
+
+                let outer_coords = project_ring(&self.vertices);
+                if outer_coords.len() < 3 {
+                    return Vec::new();
+                }
+
+                let hole_linestrings: Vec<GeoLineString<Real>> = self
+                    .holes
+                    .iter()
+                    .map(|h| GeoLineString::new(project_ring(h)))
+                    .collect();
+
+                let geo_poly = GeoPolygon::new(
+                    GeoLineString::new(outer_coords),
+                    hole_linestrings,
+                );
+
+                let Ok(tris) = geo_poly.constrained_triangulation(Default::default()) else {
+                    return Vec::new();
+                };
+
+                let mut final_triangles = Vec::with_capacity(tris.len());
+                for triangle in tris {
+                    let [a, b, c] = [triangle.0, triangle.1, triangle.2];
+                    let va = Vertex::new(
+                        Point3::from(origin_3d.coords + a.x * u + a.y * v),
+                        normal_3d,
+                    );
+                    let vb = Vertex::new(
+                        Point3::from(origin_3d.coords + b.x * u + b.y * v),
+                        normal_3d,
+                    );
+                    let vc = Vertex::new(
+                        Point3::from(origin_3d.coords + c.x * u + c.y * v),
+                        normal_3d,
+                    );
+
+                    // Skip degenerate (zero-area) triangles
+                    let edge1 = vb.position - va.position;
+                    let edge2 = vc.position - va.position;
+                    if edge1.cross(&edge2).norm_squared()
+                        < crate::float_types::tolerance() * crate::float_types::tolerance()
+                    {
+                        continue;
+                    }
+
+                    final_triangles.push([va, vb, vc]);
+                }
+
+                return final_triangles;
+            }
+
+            // ── No holes: existing spade-based CDT with refinement ──
             use spade::{
                 AngleLimit,
                 ConstrainedDelaunayTriangulation,

@@ -33,6 +33,74 @@ impl MeshJs {
         MeshJs { inner: mesh }
     }
 
+    /// Create a triangulated mesh from a planar polygon (flat [x,y,z,...] outer boundary)
+    /// with interior holes (array of flat [x,y,z,...] arrays).
+    ///
+    /// The normal for each vertex is computed from the outer boundary.
+    #[wasm_bindgen(js_name=fromPointsWithHoles)]
+    pub fn from_points_with_holes(
+        outer_points: Vec<f64>,
+        hole_arrays: Vec<js_sys::Float64Array>,
+        metadata: JsValue,
+    ) -> MeshJs {
+        use crate::polygon::Polygon;
+        use crate::vertex::Vertex;
+
+        // Parse outer ring: groups of 3 floats → Vertex
+        let outer_verts: Vec<Vertex> = outer_points
+            .chunks_exact(3)
+            .map(|c| {
+                Vertex::new(
+                    Point3::new(c[0] as Real, c[1] as Real, c[2] as Real),
+                    Vector3::zeros(), // normal set below
+                )
+            })
+            .collect();
+
+        if outer_verts.len() < 3 {
+            return MeshJs { inner: Mesh::new() };
+        }
+
+        // Compute a face normal from the outer ring
+        let e1 = outer_verts[1].position - outer_verts[0].position;
+        let e2 = outer_verts[2].position - outer_verts[0].position;
+        let normal = e1.cross(&e2).normalize();
+
+        // Assign the normal to all outer vertices
+        let outer_verts: Vec<Vertex> = outer_verts
+            .into_iter()
+            .map(|mut v| {
+                v.normal = normal;
+                v
+            })
+            .collect();
+
+        // Parse hole rings
+        let holes: Vec<Vec<Vertex>> = hole_arrays
+            .into_iter()
+            .map(|arr| {
+                let data = arr.to_vec();
+                data.chunks_exact(3)
+                    .map(|c| {
+                        Vertex::new(
+                            Point3::new(c[0] as Real, c[1] as Real, c[2] as Real),
+                            normal,
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let meta = js_metadata_to_string(metadata).unwrap_or(None);
+        let poly = Polygon::new_with_holes(outer_verts, holes, meta);
+        let mesh = Mesh::from_polygons(&[poly], None);
+
+        // Triangulate so the result is ready for rendering
+        MeshJs {
+            inner: mesh.triangulate(),
+        }
+    }
+
     /// Return an interleaved array of vertex positions (x,y,z)*.
     #[wasm_bindgen(js_name = positions)]
     pub fn positions(&self) -> Float64Array {
