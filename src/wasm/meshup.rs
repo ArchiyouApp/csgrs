@@ -561,7 +561,20 @@ impl NurbsCurve3DJs
         }
 
         // All points collinear: default normal to Z-up
-        let normal = normal.unwrap_or(Vector3::new(0.0, 0.0, 1.0));
+        let raw_normal = normal.unwrap_or(Vector3::new(0.0, 0.0, 1.0));
+
+        // Canonicalize direction so differently-wound versions of the same plane
+        // (e.g. a curve and its offset) always return the same normal.
+        // Pick the half-space where the first non-zero component is positive.
+        let normal = if raw_normal.z < -tol {
+            -raw_normal
+        } else if raw_normal.z.abs() <= tol && raw_normal.y < -tol {
+            -raw_normal
+        } else if raw_normal.z.abs() <= tol && raw_normal.y.abs() <= tol && raw_normal.x < 0.0 {
+            -raw_normal
+        } else {
+            raw_normal
+        };
 
         // Verify all points lie on the plane
         for p in &pts {

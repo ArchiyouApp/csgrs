@@ -481,8 +481,10 @@ impl<S: Clone + Send + Sync> Polygon<S> {
                 }
             };
 
-            // Refine the CDT — skip refinement for very thin polygons
-            // (aspect ratio check: compare area to perimeter² to detect slivers)
+            // Refine the CDT only for very large polygons.
+            // For typical user outlines (small/medium rings), refinement can create
+            // excessive triangle counts and hurt editability/export size.
+            // (aspect ratio check retained: compare area to perimeter² to detect slivers)
             let perimeter: Real = {
                 let mut p: Real = 0.0;
                 for i in 0..all_vertices_2d.len() {
@@ -496,7 +498,8 @@ impl<S: Clone + Send + Sync> Polygon<S> {
             // For a circle, area/perimeter² ≈ 1/(4π) ≈ 0.08.
             // For a very thin polygon, this ratio → 0. Skip refinement for slivers.
             let compactness = signed_area_2x.abs() / (perimeter * perimeter + crate::float_types::tolerance());
-            if compactness > 1e-6 {
+            const REFINE_MIN_VERTS: usize = 64;
+            if all_vertices_2d.len() >= REFINE_MIN_VERTS && compactness > 1e-6 {
                 let refinement = RefinementParameters::<Real>::new()
                     .with_angle_limit(AngleLimit::from_deg(5.0))
                     .keep_constraint_edges()
@@ -511,6 +514,18 @@ impl<S: Clone + Send + Sync> Polygon<S> {
             for face in cdt.inner_faces() {
                 // Each face is a triangle; get its three vertices
                 let verts = face.vertices(); // [VertexHandle; 3]
+
+                // Spade can still expose triangles outside the constrained ring
+                // depending on refinement/exclusion behavior; keep only faces
+                // whose centroid lies inside the polygon boundary.
+                let p0 = verts[0].position();
+                let p1 = verts[1].position();
+                let p2 = verts[2].position();
+                let cx = (p0.x + p1.x + p2.x) / 3.0;
+                let cy = (p0.y + p1.y + p2.y) / 3.0;
+                if !point_in_ring_2d(cx, cy, &all_vertices_2d) {
+                    continue;
+                }
 
                 let mut tri_vertices = [
                     Vertex::new(
@@ -754,4 +769,59 @@ fn segments_intersect_2d(
     // Strict interior intersection (excluding endpoints)
     let eps = 1e-10;
     t > eps && t < 1.0 - eps && u > eps && u < 1.0 - eps
+}
+
+/// Point-in-polygon test for a simple 2D ring using ray casting.
+/// Returns true for inside points and points very close to the boundary.
+fn point_in_ring_2d(px: Real, py: Real, ring: &[geo::Coord<Real>]) -> bool {
+    if ring.len() < 3 {
+        return false;
+    }
+
+    let eps = 1e-10;
+
+    // Boundary check first: point on any segment is considered inside.
+    for i in 0..ring.len() {
+        let j = (i + 1) % ring.len();
+        let x1 = ring[i].x;
+        let y1 = ring[i].y;
+        let x2 = ring[j].x;
+        let y2 = ring[j].y;
+
+        let cross = (px - x1) * (y2 - y1) - (py - y1) * (x2 - x1);
+        if cross.abs() <= eps {
+            let min_x = x1.min(x2) - eps;
+            let max_x = x1.max(x2) + eps;
+            let min_y = y1.min(y2) - eps;
+            let max_y = y1.max(y2) + eps;
+            if px >= min_x && px <= max_x && py >= min_y && py <= max_y {
+                return true;
+            }
+        }
+    }
+
+    // Ray-casting parity test.
+    let mut inside = false;
+    for i in 0..ring.len() {
+        let j = (i + 1) % ring.len();
+        let xi = ring[i].x;
+        let yi = ring[i].y;
+        let xj = ring[j].x;
+        let yj = ring[j].y;
+
+        let denom = yj - yi;
+        let denom_safe = if denom.abs() < eps {
+            if denom >= 0.0 { eps } else { -eps }
+        } else {
+            denom
+        };
+        let x_intersect = (xj - xi) * (py - yi) / denom_safe + xi;
+        let intersects = ((yi > py) != (yj > py)) && (px < x_intersect);
+
+        if intersects {
+            inside = !inside;
+        }
+    }
+
+    inside
 }

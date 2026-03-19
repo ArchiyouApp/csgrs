@@ -47,8 +47,7 @@ if (import.meta.client)
           const col = i % GRID_NUM_COLS;
           const bbox = p.boundingBox();
           const bboxWidth = bbox.max[0] - bbox.min[0];
-          //console.log(row);
-          console.log(col);
+          // ...existing code...
           console.log(bboxWidth);
           console.log(`col:${col}, row:${row}`);
           
