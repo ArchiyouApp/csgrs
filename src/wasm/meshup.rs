@@ -3,11 +3,12 @@
 // - TODO: BHV
 
 use crate::float_types::Real;
-use nalgebra::{ Point3, Point4, Rotation3, Translation3, Matrix4, Vector3 };
+use nalgebra::{ Point3, Point4, Quaternion, Rotation3, Translation3, Matrix4, UnitQuaternion, Vector3 };
 use curvo::prelude::{ NurbsCurve2D, NurbsCurve3D, CompoundCurve2D, Tessellation, BoundingBox, Transformable,
         CompoundCurve3D, Fillet, FilletRadiusOption, FilletRadiusParameterOption,
         CurveOffsetOption, CurveOffsetCornerType, Offset, Intersects, HasIntersection,
-        TrimRange, Split, Boolean, Clip, Invertible };
+        TrimRange, Split, Boolean, Clip, Invertible,
+        NurbsSurface3D, AdaptiveTessellationOptions };
 use curvo::prelude::operation::BooleanOperation;
 
 use super::point_js::{ Point3Js };
@@ -477,6 +478,17 @@ impl NurbsCurve3DJs
         NurbsCurve3DJs { inner: curve }
     }
 
+    /// Rotate the curve by a unit quaternion given as components `(w, x, y, z)`.
+    /// The quaternion is normalized before use.
+    #[wasm_bindgen(js_name = rotateQuaternion)]
+    pub fn rotate_quaternion(&self, w: Real, x: Real, y: Real, z: Real) -> NurbsCurve3DJs {
+        let q = UnitQuaternion::new_normalize(Quaternion::new(w, x, y, z));
+        let mat4 = q.to_homogeneous();
+        let mut curve = self.inner.clone();
+        curve.transform(&mat4);
+        NurbsCurve3DJs { inner: curve }
+    }
+
     /// Scale the curve by factors along the X, Y, and Z axes
     pub fn scale(&self, sx: Real, sy: Real, sz: Real) -> NurbsCurve3DJs {
         #[rustfmt::skip]
@@ -734,6 +746,47 @@ impl NurbsCurve3DJs
         clip_regions_to_3d(clip, &origin, &local_x, &local_y)
     }
 
+    // -----------------------------------------------------------------------
+    // Surface creation
+    // -----------------------------------------------------------------------
+
+    /// Extrude this curve along a direction vector to create a `NurbsSurfaceJs`.
+    pub fn extrude(&self, direction: &Vector3Js) -> NurbsSurfaceJs {
+        let v: Vector3<Real> = direction.into();
+        NurbsSurfaceJs { inner: NurbsSurface3D::extrude(&self.inner, &v) }
+    }
+
+    /// Extrude this curve along XYZ components to create a `NurbsSurfaceJs`.
+    #[wasm_bindgen(js_name = extrudeComponents)]
+    pub fn extrude_components(&self, dx: Real, dy: Real, dz: Real) -> NurbsSurfaceJs {
+        NurbsSurfaceJs { inner: NurbsSurface3D::extrude(&self.inner, &Vector3::new(dx, dy, dz)) }
+    }
+
+    /// Sweep this curve (as profile) along a `rail` curve to create a `NurbsSurfaceJs`.
+    ///
+    /// # Arguments
+    /// * `rail`     – the path curve
+    /// * `degree_v` – optional degree for the sweep direction
+    pub fn sweep(&self, rail: &NurbsCurve3DJs, degree_v: Option<usize>) -> Result<NurbsSurfaceJs, JsValue> {
+        NurbsSurface3D::try_sweep(&self.inner, &rail.inner, degree_v)
+            .map(|s| NurbsSurfaceJs { inner: s })
+            .map_err(|e| JsValue::from_str(&format!("sweep() failed: {:?}", e)))
+    }
+
+    /// Loft through an ordered array of curves to create a `NurbsSurfaceJs`.
+    ///
+    /// Static method — call as `NurbsCurve3DJs.loft(curves, degreeV?)`.
+    ///
+    /// # Arguments
+    /// * `curves`   – ordered array of profile curves
+    /// * `degree_v` – optional degree for the loft direction
+    pub fn loft(curves: Vec<NurbsCurve3DJs>, degree_v: Option<usize>) -> Result<NurbsSurfaceJs, JsValue> {
+        let inner_curves: Vec<NurbsCurve3D<Real>> = curves.into_iter().map(|c| c.inner).collect();
+        NurbsSurface3D::try_loft(&inner_curves, degree_v)
+            .map(|s| NurbsSurfaceJs { inner: s })
+            .map_err(|e| JsValue::from_str(&format!("loft() failed: {:?}", e)))
+    }
+
 }
 
 ///// NURBSCURVE3DJS NON-WASM  ////
@@ -976,6 +1029,17 @@ impl CompoundCurve3DJs
     pub fn rotate(&self, ax: Real, ay: Real, az: Real) -> CompoundCurve3DJs {
         let rotation = Rotation3::from_euler_angles(ax, ay, az);
         let mat4 = rotation.to_homogeneous();
+        let mut curve = self.inner.clone();
+        curve.transform(&mat4);
+        CompoundCurve3DJs { inner: curve }
+    }
+
+    /// Rotate the compound curve by a unit quaternion given as components `(w, x, y, z)`.
+    /// The quaternion is normalized before use.
+    #[wasm_bindgen(js_name = rotateQuaternion)]
+    pub fn rotate_quaternion(&self, w: Real, x: Real, y: Real, z: Real) -> CompoundCurve3DJs {
+        let q = UnitQuaternion::new_normalize(Quaternion::new(w, x, y, z));
+        let mat4 = q.to_homogeneous();
         let mut curve = self.inner.clone();
         curve.transform(&mat4);
         CompoundCurve3DJs { inner: curve }
@@ -1265,6 +1329,34 @@ impl CompoundCurve3DJs
 
         clip_regions_to_3d(clip, &origin, &local_x, &local_y)
     }
+
+    // -----------------------------------------------------------------------
+    // Surface creation
+    // -----------------------------------------------------------------------
+
+    /// Extrude each span of this compound curve along a direction vector.
+    ///
+    /// Returns one `NurbsSurfaceJs` per span. The surfaces share boundaries at
+    /// span junctions and together form a continuous ruled solid.
+    pub fn extrude(&self, direction: &Vector3Js) -> Vec<NurbsSurfaceJs> {
+        let v: Vector3<Real> = direction.into();
+        self.inner.spans()
+            .iter()
+            .map(|span| NurbsSurfaceJs { inner: NurbsSurface3D::extrude(span, &v) })
+            .collect()
+    }
+
+    /// Extrude each span of this compound curve along XYZ components.
+    ///
+    /// Returns one `NurbsSurfaceJs` per span.
+    #[wasm_bindgen(js_name = extrudeComponents)]
+    pub fn extrude_components(&self, dx: Real, dy: Real, dz: Real) -> Vec<NurbsSurfaceJs> {
+        let v = Vector3::new(dx, dy, dz);
+        self.inner.spans()
+            .iter()
+            .map(|span| NurbsSurfaceJs { inner: NurbsSurface3D::extrude(span, &v) })
+            .collect()
+    }
 }
 
 // COMPOUND CURVE3D JS - NON-WASM
@@ -1289,6 +1381,203 @@ impl CompoundCurve3DJs {
 impl From<CompoundCurve3D<Real>> for CompoundCurve3DJs {
     fn from(curve: CompoundCurve3D<Real>) -> Self {
         CompoundCurve3DJs { inner: curve }
+    }
+}
+
+
+//// NURBS SURFACE ////
+
+/// JavaScript wrapper around Curvo's `NurbsSurface3D`.
+///
+/// ## Construction
+/// Surfaces are obtained from the curve classes:
+/// - `curve.extrude(direction)` / `curve.extrudeComponents(dx, dy, dz)` on `NurbsCurve3DJs`
+/// - `curve.sweep(rail, degreeV?)` on `NurbsCurve3DJs`
+/// - `NurbsCurve3DJs.loft(curves, degreeV?)` static method
+/// - `compound.extrude(direction)` / `compound.extrudeComponents(dx, dy, dz)` on `CompoundCurve3DJs`
+///
+/// ## Output
+/// Call `toArrays(tolerance?)` to get `{ positions, normals, indices }` typed arrays
+/// suitable for direct use in WebGL / Three.js buffer geometries.
+#[wasm_bindgen]
+pub struct NurbsSurfaceJs {
+    pub(crate) inner: NurbsSurface3D<Real>,
+}
+
+#[wasm_bindgen]
+impl NurbsSurfaceJs {
+
+    // -----------------------------------------------------------------------
+    // Output – tessellation → buffer arrays
+    // -----------------------------------------------------------------------
+
+    /// Tessellate the surface and return `{ positions, normals, indices }` flat typed arrays.
+    ///
+    /// # Arguments
+    /// * `tolerance` – adaptive tessellation normal-tolerance (default `1e-2`).
+    ///                 Smaller values produce a finer mesh.
+    #[wasm_bindgen(js_name = toArrays)]
+    pub fn to_arrays(&self, tolerance: Option<f64>) -> JsValue {
+        use js_sys::{Float64Array, Object, Reflect, Uint32Array};
+
+        let tol = tolerance.unwrap_or(1e-2);
+        let options = AdaptiveTessellationOptions {
+            norm_tolerance: tol,
+            ..Default::default()
+        };
+        let tess = self.inner.tessellate(Some(options));
+
+        let pts = tess.points();
+        let nrm = tess.normals();
+        let fcs = tess.faces();
+
+        let mut positions: Vec<f64> = Vec::with_capacity(pts.len() * 3);
+        for p in pts {
+            positions.push(p.x as f64);
+            positions.push(p.y as f64);
+            positions.push(p.z as f64);
+        }
+
+        let mut normals: Vec<f64> = Vec::with_capacity(nrm.len() * 3);
+        for n in nrm {
+            normals.push(n.x as f64);
+            normals.push(n.y as f64);
+            normals.push(n.z as f64);
+        }
+
+        let mut indices: Vec<u32> = Vec::with_capacity(fcs.len() * 3);
+        for f in fcs {
+            indices.push(f[0] as u32);
+            indices.push(f[1] as u32);
+            indices.push(f[2] as u32);
+        }
+
+        let pos_array = Float64Array::from(positions.as_slice());
+        let norm_array = Float64Array::from(normals.as_slice());
+        let idx_array = Uint32Array::from(indices.as_slice());
+
+        let obj = Object::new();
+        Reflect::set(&obj, &"positions".into(), &pos_array).unwrap();
+        Reflect::set(&obj, &"normals".into(), &norm_array).unwrap();
+        Reflect::set(&obj, &"indices".into(), &idx_array).unwrap();
+        obj.into()
+    }
+
+    /// Return a regular (uniform grid) tessellation as `{ positions, normals, indices }`.
+    ///
+    /// # Arguments
+    /// * `divs_u` – number of divisions in the U direction
+    /// * `divs_v` – number of divisions in the V direction
+    #[wasm_bindgen(js_name = toArraysRegular)]
+    pub fn to_arrays_regular(&self, divs_u: usize, divs_v: usize) -> JsValue {
+        use js_sys::{Float64Array, Object, Reflect, Uint32Array};
+
+        let tess = self.inner.regular_tessellate(divs_u, divs_v);
+
+        let pts = tess.points();
+        let nrm = tess.normals();
+        let fcs = tess.faces();
+
+        let mut positions: Vec<f64> = Vec::with_capacity(pts.len() * 3);
+        for p in pts {
+            positions.push(p.x as f64);
+            positions.push(p.y as f64);
+            positions.push(p.z as f64);
+        }
+
+        let mut normals: Vec<f64> = Vec::with_capacity(nrm.len() * 3);
+        for n in nrm {
+            normals.push(n.x as f64);
+            normals.push(n.y as f64);
+            normals.push(n.z as f64);
+        }
+
+        let mut indices: Vec<u32> = Vec::with_capacity(fcs.len() * 3);
+        for f in fcs {
+            indices.push(f[0] as u32);
+            indices.push(f[1] as u32);
+            indices.push(f[2] as u32);
+        }
+
+        let pos_array = Float64Array::from(positions.as_slice());
+        let norm_array = Float64Array::from(normals.as_slice());
+        let idx_array = Uint32Array::from(indices.as_slice());
+
+        let obj = Object::new();
+        Reflect::set(&obj, &"positions".into(), &pos_array).unwrap();
+        Reflect::set(&obj, &"normals".into(), &norm_array).unwrap();
+        Reflect::set(&obj, &"indices".into(), &idx_array).unwrap();
+        obj.into()
+    }
+
+    // -----------------------------------------------------------------------
+    // Properties
+    // -----------------------------------------------------------------------
+
+    /// U-direction degree of the surface
+    #[wasm_bindgen(js_name = uDegree)]
+    pub fn u_degree(&self) -> usize {
+        self.inner.u_degree()
+    }
+
+    /// V-direction degree of the surface
+    #[wasm_bindgen(js_name = vDegree)]
+    pub fn v_degree(&self) -> usize {
+        self.inner.v_degree()
+    }
+
+    /// Point on surface at parameters (u, v)
+    #[wasm_bindgen(js_name = pointAt)]
+    pub fn point_at(&self, u: Real, v: Real) -> Point3Js {
+        Point3Js::from(self.inner.point_at(u, v))
+    }
+
+    /// Normal vector at parameters (u, v)
+    #[wasm_bindgen(js_name = normalAt)]
+    pub fn normal_at(&self, u: Real, v: Real) -> Vector3Js {
+        Vector3Js::from(self.inner.normal_at(u, v))
+    }
+
+    /// Knot domains as [u_min, u_max, v_min, v_max]
+    #[wasm_bindgen(js_name = knotsDomain)]
+    pub fn knots_domain(&self) -> Vec<Real> {
+        let ((u0, u1), (v0, v1)) = self.inner.knots_domain();
+        vec![u0, u1, v0, v1]
+    }
+
+    // -----------------------------------------------------------------------
+    // Transformations
+    // -----------------------------------------------------------------------
+
+    /// Translate the surface by a vector
+    pub fn translate(&self, offset: &Vector3Js) -> NurbsSurfaceJs {
+        let v: Vector3<Real> = offset.into();
+        let mat4 = Translation3::new(v.x, v.y, v.z).to_homogeneous();
+        let mut s = self.inner.clone();
+        s.transform(&mat4);
+        NurbsSurfaceJs { inner: s }
+    }
+
+    /// Rotate the surface by Euler angles (radians)
+    pub fn rotate(&self, ax: Real, ay: Real, az: Real) -> NurbsSurfaceJs {
+        let mat4 = Rotation3::from_euler_angles(ax, ay, az).to_homogeneous();
+        let mut s = self.inner.clone();
+        s.transform(&mat4);
+        NurbsSurfaceJs { inner: s }
+    }
+
+    /// Scale the surface by per-axis factors
+    pub fn scale(&self, sx: Real, sy: Real, sz: Real) -> NurbsSurfaceJs {
+        #[rustfmt::skip]
+        let mat4 = Matrix4::new(
+            sx,  0.0, 0.0, 0.0,
+            0.0,  sy, 0.0, 0.0,
+            0.0, 0.0,  sz, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        );
+        let mut s = self.inner.clone();
+        s.transform(&mat4);
+        NurbsSurfaceJs { inner: s }
     }
 }
 

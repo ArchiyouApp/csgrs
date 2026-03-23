@@ -737,4 +737,129 @@ impl SketchJs {
             inner: self.inner.hilbert_curve(order, padding),
         }
     }
+
+    /// Return a human-readable summary of every ring coordinate in the
+    /// underlying `geo::GeometryCollection`.  Useful for debugging sketch
+    /// content from TypeScript without having to read raw buffers.
+    ///
+    /// Example output:
+    /// ```
+    /// Geometry[0] Polygon
+    ///   exterior (6 pts): [0.00,0.00] [1.00,0.00] ...
+    ///   hole[0]   (5 pts): [0.25,0.25] ...
+    /// Geometry[1] LineString
+    ///   (3 pts): [0.00,0.00] [5.00,5.00] ...
+    /// ```
+    #[wasm_bindgen(js_name = debugGeometry)]
+    pub fn debug_geometry(&self) -> String {
+        use geo::{CoordsIter, Geometry};
+        use std::fmt::Write;
+
+        let mut out = String::new();
+
+        for (gi, geom) in self.inner.geometry.0.iter().enumerate() {
+            match geom {
+                Geometry::Polygon(poly) => {
+                    let _ = writeln!(out, "Geometry[{gi}] Polygon");
+
+                    // exterior ring
+                    let ext_pts: Vec<String> = poly
+                        .exterior()
+                        .coords_iter()
+                        .map(|c| format!("[{:.4},{:.4}]", c.x, c.y))
+                        .collect();
+                    let _ = writeln!(
+                        out,
+                        "  exterior ({} pts): {}",
+                        ext_pts.len(),
+                        ext_pts.join(" ")
+                    );
+
+                    // interior holes
+                    for (hi, hole) in poly.interiors().iter().enumerate() {
+                        let hole_pts: Vec<String> = hole
+                            .coords_iter()
+                            .map(|c| format!("[{:.4},{:.4}]", c.x, c.y))
+                            .collect();
+                        let _ = writeln!(
+                            out,
+                            "  hole[{hi}] ({} pts): {}",
+                            hole_pts.len(),
+                            hole_pts.join(" ")
+                        );
+                    }
+                }
+
+                Geometry::MultiPolygon(mp) => {
+                    let _ = writeln!(out, "Geometry[{gi}] MultiPolygon ({} polys)", mp.0.len());
+                    for (pi, poly) in mp.0.iter().enumerate() {
+                        let ext_pts: Vec<String> = poly
+                            .exterior()
+                            .coords_iter()
+                            .map(|c| format!("[{:.4},{:.4}]", c.x, c.y))
+                            .collect();
+                        let _ = writeln!(
+                            out,
+                            "  poly[{pi}] exterior ({} pts): {}",
+                            ext_pts.len(),
+                            ext_pts.join(" ")
+                        );
+                        for (hi, hole) in poly.interiors().iter().enumerate() {
+                            let hole_pts: Vec<String> = hole
+                                .coords_iter()
+                                .map(|c| format!("[{:.4},{:.4}]", c.x, c.y))
+                                .collect();
+                            let _ = writeln!(
+                                out,
+                                "  poly[{pi}] hole[{hi}] ({} pts): {}",
+                                hole_pts.len(),
+                                hole_pts.join(" ")
+                            );
+                        }
+                    }
+                }
+
+                Geometry::LineString(ls) => {
+                    let pts: Vec<String> = ls
+                        .coords_iter()
+                        .map(|c| format!("[{:.4},{:.4}]", c.x, c.y))
+                        .collect();
+                    let _ = writeln!(
+                        out,
+                        "Geometry[{gi}] LineString ({} pts): {}",
+                        pts.len(),
+                        pts.join(" ")
+                    );
+                }
+
+                Geometry::Point(p) => {
+                    let _ = writeln!(
+                        out,
+                        "Geometry[{gi}] Point [{:.4},{:.4}]",
+                        p.x(),
+                        p.y()
+                    );
+                }
+
+                Geometry::Line(l) => {
+                    let _ = writeln!(
+                        out,
+                        "Geometry[{gi}] Line [{:.4},{:.4}] -> [{:.4},{:.4}]",
+                        l.start.x, l.start.y, l.end.x, l.end.y
+                    );
+                }
+
+                other => {
+                    // geo::Geometry doesn't implement Display, so use Debug
+                    let _ = writeln!(out, "Geometry[{gi}] (unsupported type: {:?})", std::mem::discriminant(other));
+                }
+            }
+        }
+
+        if out.is_empty() {
+            "(empty sketch)".to_string()
+        } else {
+            out
+        }
+    }
 }

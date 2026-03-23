@@ -1,5 +1,5 @@
 use crate::float_types::Real;
-use nalgebra::{Vector3, Rotation3, Unit};
+use nalgebra::{Vector3, Rotation3, Unit, UnitQuaternion, Quaternion};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
 
@@ -111,41 +111,17 @@ impl Vector3Js {
         }
     }
 
-    #[wasm_bindgen(js_name = rotateEuler)]
-    pub fn rotate_euler(&self, roll: f64, pitch: f64, yaw: f64) -> Vector3Js
-    {
-        let rotation = Rotation3::from_euler_angles(roll as Real, pitch as Real, yaw as Real);
+    /// Rotate this vector by a unit quaternion given as components `(w, x, y, z)`.
+    /// The quaternion is expected to be unit-length.
+    #[wasm_bindgen(js_name = rotateQuaternion)]
+    pub fn rotate_quaternion(&self, w: f64, x: f64, y: f64, z: f64) -> Vector3Js {
+        
+        let q = UnitQuaternion::new_normalize(Quaternion::new(
+            w as Real, x as Real, y as Real, z as Real,
+        ));
         Vector3Js {
-            inner: rotation * self.inner
+            inner: q * self.inner,
         }
-    }
-
-    /// Get the Euler angles (roll, pitch, yaw in radians) needed to rotate this vector to align with another.
-    /// Returns [0, 0, 0] if the vectors are already aligned.
-    /// For anti-parallel vectors, rotates 180° around a perpendicular axis.
-    #[wasm_bindgen(js_name = angleEuler)]
-    pub fn angle_euler(&self, other: &Vector3Js) -> js_sys::Array {
-        // Use plain normalized Vector3 — rotation_between expects &Vector3, not &Unit<Vector3>
-        let a = self.inner.normalize();
-        let b = other.inner.normalize();
-        let rotation = match Rotation3::rotation_between(&a, &b) {
-            Some(r) => r,
-            None => {
-                // Vectors are anti-parallel — rotate 180° around any perpendicular axis
-                let perp = if a.x.abs() < 0.9 {
-                    Unit::new_normalize(a.cross(&Vector3::x()))
-                } else {
-                    Unit::new_normalize(a.cross(&Vector3::y()))
-                };
-                Rotation3::from_axis_angle(&perp, std::f64::consts::PI as Real)
-            }
-        };
-        let (roll, pitch, yaw) = rotation.euler_angles();
-        let arr = js_sys::Array::new();
-        arr.push(&JsValue::from_f64(roll as f64));
-        arr.push(&JsValue::from_f64(pitch as f64));
-        arr.push(&JsValue::from_f64(yaw as f64));
-        arr
     }
 
     pub fn cross(&self, other: &Vector3Js) -> Vector3Js
@@ -154,6 +130,37 @@ impl Vector3Js {
             inner: self.inner.cross(&other.inner)
         }
     }
+
+    /// Compute the shortest-arc unit quaternion that rotates `self` to align with `other`.
+    /// Returns a plain JS object `{ w, x, y, z }`.
+    /// For anti-parallel vectors, a 180° rotation around a perpendicular axis is chosen.
+    #[wasm_bindgen(js_name = rotationBetween)]
+    pub fn rotation_between(&self, other: &Vector3Js) -> Result<JsValue, JsValue> {
+        let a = self.inner.normalize();
+        let b = other.inner.normalize();
+        let q = match UnitQuaternion::rotation_between(&a, &b) {
+            Some(q) => q,
+            None => {
+                // Vectors are anti-parallel — rotate 180° around a perpendicular axis
+                let perp = if a.x.abs() < 0.9 {
+                    Unit::new_normalize(a.cross(&Vector3::x()))
+                } else {
+                    Unit::new_normalize(a.cross(&Vector3::y()))
+                };
+                UnitQuaternion::from_axis_angle(&perp, std::f64::consts::PI as Real)
+            }
+        };
+        let w = q.scalar() as f64;
+        let v = q.vector();
+        let obj = js_sys::Object::new();
+        js_sys::Reflect::set(&obj, &JsValue::from_str("w"), &JsValue::from_f64(w))?;
+        js_sys::Reflect::set(&obj, &JsValue::from_str("x"), &JsValue::from_f64(v.x as f64))?;
+        js_sys::Reflect::set(&obj, &JsValue::from_str("y"), &JsValue::from_f64(v.y as f64))?;
+        js_sys::Reflect::set(&obj, &JsValue::from_str("z"), &JsValue::from_f64(v.z as f64))?;
+        Ok(obj.into())
+    }
+
+    
 
 }
 

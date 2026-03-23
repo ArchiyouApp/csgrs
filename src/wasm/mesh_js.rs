@@ -9,7 +9,7 @@ use crate::wasm::{
 use crate::io::gltf::{UpAxis};
 use curvo::prelude::Tessellation;
 use js_sys::{Float64Array, Object, Reflect, Uint32Array};
-use nalgebra::{Matrix4, Point3, Vector3};
+use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 use serde_wasm_bindgen::from_value;
 use wasm_bindgen::prelude::*;
 
@@ -316,10 +316,22 @@ impl MeshJs {
         }
     }
 
+    // Rotation angles are in degrees
+    // This is extrinsic euler (so rotation is applied in x,y,z order, relative to world axes)
     #[wasm_bindgen(js_name = rotate)]
     pub fn rotate(&self, rx: Real, ry: Real, rz: Real) -> Self {
         Self {
             inner: self.inner.rotate(rx, ry, rz),
+        }
+    }
+
+    /// Rotate this mesh by a unit quaternion given as components `(w, x, y, z)`.
+    /// The quaternion is normalized before use, so non-unit input is safe.
+    #[wasm_bindgen(js_name = rotateQuaternion)]
+    pub fn rotate_quaternion(&self, w: Real, x: Real, y: Real, z: Real) -> Self {
+        let q = UnitQuaternion::new_normalize(Quaternion::new(w, x, y, z));
+        Self {
+            inner: self.inner.transform(&q.to_homogeneous()),
         }
     }
 

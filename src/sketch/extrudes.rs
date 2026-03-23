@@ -154,12 +154,14 @@ impl<S: Clone + Debug + Send + Sync> Sketch<S> {
                         let b_j = Point3::new(c_j.x, c_j.y, 0.0);
                         let t_i = b_i + direction;
                         let t_j = b_j + direction;
+                        // Meshup Fix for normals or extrude sides
+                        let normal = (b_j - b_i).cross(&direction).normalize();
                         out_polygons.push(Polygon::new(
                             vec![
-                                Vertex::new(b_i, Vector3::zeros()),
-                                Vertex::new(b_j, Vector3::zeros()),
-                                Vertex::new(t_j, Vector3::zeros()),
-                                Vertex::new(t_i, Vector3::zeros()),
+                                Vertex::new(b_i, normal),
+                                Vertex::new(b_j, normal),
+                                Vertex::new(t_j, normal),
+                                Vertex::new(t_i, normal),
                             ],
                             metadata.clone(),
                         ));
