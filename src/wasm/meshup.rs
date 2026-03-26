@@ -371,10 +371,13 @@ impl NurbsCurve3DJs
                 new_cps.insert(0, new_cps[0] + dir * distance);
             }
 
+            // Try to merge spans that can be merged into a single polyline
             let extended = NurbsCurve3D::polyline(&new_cps, false);
             CompoundCurve3D::try_new(vec![extended])
                 .map(CompoundCurve3DJs::from)
+                .map(|c| c.merge_colinear_lines(1e-3))
                 .map_err(|e| JsValue::from_str(&format!("Failed to wrap extended polyline: {:?}", e)))
+                
         } else {
             // Higher-degree: add a tangent line segment at the boundary
             let (t_start, t_end) = self.inner.knots_domain();
@@ -398,6 +401,7 @@ impl NurbsCurve3DJs
 
             CompoundCurve3D::try_new(spans)
                 .map(CompoundCurve3DJs::from)
+                .map(|c| c.merge_colinear_lines(1e-3))
                 .map_err(|e| JsValue::from_str(&format!("Failed to create extended curve: {:?}", e)))
         }
     }
@@ -1134,6 +1138,161 @@ impl CompoundCurve3DJs
         }
     }
 
+    /// Merge consecutive collinear degree-1 spans into single polyline spans.
+    ///
+    /// Walks through all spans and checks if consecutive degree-1 spans share
+    /// the same direction (within a small angular tolerance). Collinear runs are
+    /// collapsed into one polyline keeping only start and end points. Non-degree-1
+    /// spans and non-collinear degree-1 spans are preserved unchanged.
+    ///
+    /// Always returns a `CompoundCurve3DJs`.
+    #[wasm_bindgen(js_name = mergeColinearLines)]
+    pub fn merge_colinear_lines(&self, colinear_tol: Real) -> CompoundCurve3DJs {
+        let spans: Vec<NurbsCurve3D<Real>> = self.inner.clone().into_spans();
+
+        if spans.is_empty() {
+            return self.clone();
+        }
+
+        // If any span is not degree-1, return unchanged
+        if spans.iter().any(|s| s.degree() != 1) {
+            return self.clone();
+        }
+
+        let colinear_tol: Real = colinear_tol;
+
+        fn point_eq(a: &Point3<Real>, b: &Point3<Real>, eps: Real) -> bool {
+            (*a - *b).norm() <= eps
+        }
+
+        fn unit_dir(from: Point3<Real>, to: Point3<Real>) -> Option<Vector3<Real>> {
+            let d = to - from;
+            let len = d.norm();
+            if len < 1e-12 { None } else { Some(d / len) }
+        }
+
+        fn simplify_polyline_points(cps: &[Point3<Real>], tol: Real) -> Vec<Point3<Real>> {
+            if cps.len() <= 2 {
+                return cps.to_vec();
+            }
+
+            let mut out: Vec<Point3<Real>> = Vec::with_capacity(cps.len());
+            out.push(cps[0]);
+
+            for i in 1..(cps.len() - 1) {
+                let prev = *out.last().unwrap();
+                let curr = cps[i];
+                let next = cps[i + 1];
+
+                let d1 = unit_dir(prev, curr);
+                let d2 = unit_dir(curr, next);
+
+                let keep = match (d1, d2) {
+                    (Some(a), Some(b)) => (a.dot(&b) - 1.0).abs() >= tol,
+                    _ => true,
+                };
+
+                if keep {
+                    out.push(curr);
+                }
+            }
+
+            out.push(cps[cps.len() - 1]);
+            out
+        }
+
+        fn start_dir(span: &NurbsCurve3D<Real>) -> Option<Vector3<Real>> {
+            let cps = span.dehomogenized_control_points();
+            if cps.len() < 2 {
+                None
+            } else {
+                unit_dir(cps[0], cps[1])
+            }
+        }
+
+        fn end_dir(span: &NurbsCurve3D<Real>) -> Option<Vector3<Real>> {
+            let cps = span.dehomogenized_control_points();
+            let n = cps.len();
+            if n < 2 {
+                None
+            } else {
+                unit_dir(cps[n - 2], cps[n - 1])
+            }
+        }
+
+        // First simplify each degree-1 span itself (removes redundant colinear interior points).
+        let simplified_spans: Vec<NurbsCurve3D<Real>> = spans
+            .into_iter()
+            .map(|s| {
+                let cps = s.dehomogenized_control_points();
+                let simplified = simplify_polyline_points(&cps, colinear_tol);
+                NurbsCurve3D::polyline(&simplified, false)
+            })
+            .collect();
+
+        // Build groups of collinear and connected consecutive spans.
+        let mut groups: Vec<Vec<usize>> = vec![vec![0]];
+        for i in 1..simplified_spans.len() {
+            let prev = &simplified_spans[i - 1];
+            let curr = &simplified_spans[i];
+
+            let prev_cps = prev.dehomogenized_control_points();
+            let curr_cps = curr.dehomogenized_control_points();
+            let connected = !prev_cps.is_empty()
+                && !curr_cps.is_empty()
+                && point_eq(&prev_cps[prev_cps.len() - 1], &curr_cps[0], 1e-9);
+
+            let collinear = match (end_dir(prev), start_dir(curr)) {
+                (Some(a), Some(b)) => (a.dot(&b) - 1.0).abs() < colinear_tol,
+                _ => false,
+            };
+
+            if connected && collinear {
+                groups.last_mut().unwrap().push(i);
+            } else {
+                groups.push(vec![i]);
+            }
+        }
+
+        // Build merged spans from groups by concatenating polyline points.
+        let mut merged_spans: Vec<NurbsCurve3D<Real>> = Vec::new();
+        for group in &groups {
+            let mut pts: Vec<Point3<Real>> = Vec::new();
+
+            for (k, idx) in group.iter().enumerate() {
+                let cps = simplified_spans[*idx].dehomogenized_control_points();
+                if cps.is_empty() {
+                    continue;
+                }
+
+                if k == 0 {
+                    pts.extend(cps);
+                } else if !pts.is_empty() {
+                    let skip_first = point_eq(&pts[pts.len() - 1], &cps[0], 1e-9);
+                    if skip_first {
+                        pts.extend(cps.into_iter().skip(1));
+                    } else {
+                        pts.extend(cps);
+                    }
+                }
+            }
+
+            if pts.len() >= 2 {
+                let simplified_pts = simplify_polyline_points(&pts, colinear_tol);
+                merged_spans.push(NurbsCurve3D::polyline(&simplified_pts, false));
+            }
+        }
+
+        if merged_spans.is_empty() {
+            return self.clone();
+        }
+
+        match CompoundCurve3D::try_new(merged_spans) {
+            Ok(compound) => CompoundCurve3DJs::from(compound),
+            Err(_) => self.clone(),
+        }
+    }
+
     /// Extend the compound curve at one or both ends.
     ///
     /// - **Degree-1 boundary spans** are extended inline (new control point).
@@ -1194,6 +1353,7 @@ impl CompoundCurve3DJs
 
         CompoundCurve3D::try_new(spans)
             .map(CompoundCurve3DJs::from)
+            .map(|c| c.merge_colinear_lines(1e-3))
             .map_err(|e| JsValue::from_str(&format!(
                 "Failed to rebuild compound curve after extend: {:?}", e
             )))

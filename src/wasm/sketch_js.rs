@@ -291,14 +291,6 @@ impl SketchJs {
         MeshJs { inner: mesh }
     }
 
-    #[wasm_bindgen(js_name = revolve)]
-    pub fn revolve(&self, angle_degrees: Real, segments: usize) -> Result<MeshJs, JsValue> {
-        let mesh = self
-            .inner
-            .revolve(angle_degrees, segments)
-            .map_err(|e| JsValue::from_str(&format!("Revolve failed: {:?}", e)))?;
-        Ok(MeshJs { inner: mesh })
-    }
 
     #[wasm_bindgen(js_name=extrudeVectorComponents)]
     pub fn extrude_vector_components(&self, dx: Real, dy: Real, dz: Real) -> MeshJs {
@@ -312,6 +304,16 @@ impl SketchJs {
         let direction: Vector3<Real> = dir.into();
         let mesh = self.inner.extrude_vector(direction);
         MeshJs { inner: mesh }
+    }
+
+      
+    #[wasm_bindgen(js_name = revolve)]
+    pub fn revolve(&self, angle_degrees: Real, segments: usize) -> Result<MeshJs, JsValue> {
+        let mesh = self
+            .inner
+            .revolve(angle_degrees, segments)
+            .map_err(|e| JsValue::from_str(&format!("Revolve failed: {:?}", e)))?;
+        Ok(MeshJs { inner: mesh })
     }
 
     #[wasm_bindgen(js_name = sweep)]
