@@ -2673,3 +2673,53 @@ fn test_taubin_smoothing() {
         "Taubin smoothing should change vertex positions"
     );
 }
+
+// --------------------------------------------------------
+//   Edge projection debug test
+// --------------------------------------------------------
+
+#[test]
+fn debug_edge_projection_subtracted_box() {
+    use nalgebra::{Point3, Vector3};
+
+    // Build a cube centered at origin [-5..5]
+    fn translate_mesh(m: Mesh<()>, dx: f64, dy: f64, dz: f64) -> Mesh<()> {
+        Mesh {
+            polygons: m.polygons.into_iter().map(|p| {
+                let verts: Vec<_> = p.vertices.iter().map(|v| {
+                    let mut vv = *v;
+                    vv.position = Point3::new(v.position.x + dx, v.position.y + dy, v.position.z + dz);
+                    vv
+                }).collect();
+                crate::polygon::Polygon::new(verts, p.metadata.clone())
+            }).collect(),
+            bounding_box: std::sync::OnceLock::new(),
+            metadata: None,
+        }
+    }
+
+    let c1 = translate_mesh(Mesh::<()>::cube(10.0, None), -5.0, -5.0, -5.0);
+    let c2 = translate_mesh(Mesh::<()>::cube(2.0, None), 4.0, 4.0, 4.0);
+
+    let sub = c1.difference(&c2);
+    eprintln!("Polygon count after subtract: {}", sub.polygons.len());
+    for (i, poly) in sub.polygons.iter().enumerate() {
+        let n = poly.plane.normal();
+        eprintln!("  poly[{}] vertices={} normal=({:.3},{:.3},{:.3})", i, poly.vertices.len(), n.x, n.y, n.z);
+    }
+
+    let view = Vector3::new(1.0_f64, 1.0, 1.0).normalize();
+    let plane_origin = Point3::new(0.0, 0.0, 0.0);
+
+    let result = sub.project_edges(&view, &plane_origin, &view, 15.0, 8, &[]);
+    eprintln!("Visible polylines: {}", result.visible_polylines.len());
+    eprintln!("Hidden polylines: {}", result.hidden_polylines.len());
+    for (i, pl) in result.visible_polylines.iter().enumerate() {
+        let p0 = pl.first().unwrap();
+        let p1 = pl.last().unwrap();
+        eprintln!("  vis[{}]: ({:.1},{:.1},{:.1})->({:.1},{:.1},{:.1})", i, p0.x,p0.y,p0.z, p1.x,p1.y,p1.z);
+    }
+
+    assert_eq!(result.visible_polylines.len(), 18, "Expected 18 visible edges");
+    assert_eq!(result.hidden_polylines.len(), 3, "Expected 3 hidden edges");
+}

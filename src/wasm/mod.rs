@@ -2,6 +2,8 @@ use serde_json::Value as JsonValue;
 use serde_wasm_bindgen::from_value;
 use wasm_bindgen::prelude::*;
 
+pub mod bvh_types_js;
+pub mod edge_projection_js;
 pub mod matrix_js;
 pub mod mesh_js;
 pub mod metaballs_js;

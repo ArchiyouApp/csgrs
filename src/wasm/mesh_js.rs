@@ -1030,4 +1030,230 @@ impl MeshJs {
             .map(|p| Point3Js::from(p))
             .collect()
     }
+
+    // ── BVH Spatial Queries ──────────────────────────────────────────────────
+
+    /// BVH-accelerated first-hit raycast.
+    ///
+    /// Returns the closest intersection along `origin + t * direction` where
+    /// `t ∈ [0, max_dist]`, or `undefined` if there is no hit.
+    #[wasm_bindgen(js_name = raycastFirst)]
+    pub fn raycast_first_js(
+        &self,
+        ox: Real, oy: Real, oz: Real,
+        dx: Real, dy: Real, dz: Real,
+        max_dist: Real,
+    ) -> Option<crate::wasm::bvh_types_js::RaycastHitJs> {
+        use crate::wasm::bvh_types_js::RaycastHitJs;
+        let origin = Point3::new(ox, oy, oz);
+        let direction = Vector3::new(dx, dy, dz);
+        self.inner.raycast_first(&origin, &direction, max_dist)
+            .as_ref()
+            .map(RaycastHitJs::from_hit)
+    }
+
+    /// All-hits raycast: every triangle intersection along the ray, sorted by distance.
+    #[wasm_bindgen(js_name = raycastAll)]
+    pub fn raycast_all_js(
+        &self,
+        ox: Real, oy: Real, oz: Real,
+        dx: Real, dy: Real, dz: Real,
+        max_dist: Real,
+    ) -> Vec<crate::wasm::bvh_types_js::RaycastHitJs> {
+        use crate::wasm::bvh_types_js::RaycastHitJs;
+        let origin = Point3::new(ox, oy, oz);
+        let direction = Vector3::new(dx, dy, dz);
+        self.inner.raycast_all(&origin, &direction, max_dist)
+            .iter()
+            .map(RaycastHitJs::from_hit)
+            .collect()
+    }
+
+    /// Project a query point onto the nearest mesh surface (BVH-accelerated).
+    ///
+    /// Returns `undefined` if the mesh has no polygons.
+    #[wasm_bindgen(js_name = closestPoint)]
+    pub fn closest_point_js(
+        &self,
+        x: Real, y: Real, z: Real,
+    ) -> Option<crate::wasm::bvh_types_js::ClosestPointResultJs> {
+        use crate::wasm::bvh_types_js::ClosestPointResultJs;
+        let pt = Point3::new(x, y, z);
+        self.inner.closest_point(&pt)
+            .as_ref()
+            .map(ClosestPointResultJs::from_result)
+    }
+
+    /// Sample the signed distance field at a query point.
+    ///
+    /// Returns a **negative** signed distance when inside the mesh.
+    /// Returns `undefined` if the mesh has no polygons.
+    #[wasm_bindgen(js_name = sampleSdf)]
+    pub fn sample_sdf_js(
+        &self,
+        x: Real, y: Real, z: Real,
+    ) -> Option<crate::wasm::bvh_types_js::SdfSampleJs> {
+        use crate::wasm::bvh_types_js::SdfSampleJs;
+        let pt = Point3::new(x, y, z);
+        self.inner.sample_sdf(&pt)
+            .as_ref()
+            .map(SdfSampleJs::from_sample)
+    }
+
+    /// Test whether this mesh physically overlaps another (BVH-accelerated).
+    #[wasm_bindgen(js_name = hits)]
+    pub fn hits_js(&self, other: &MeshJs) -> bool {
+        self.inner.hits(&other.inner)
+    }
+
+    /// Minimum separating distance between this mesh and another.
+    ///
+    /// Returns `0.0` if they intersect.
+    #[wasm_bindgen(js_name = distanceTo)]
+    pub fn distance_to_js(&self, other: &MeshJs) -> Real {
+        self.inner.distance_to_mesh(&other.inner)
+    }
+
+    /// Orthographically project every vertex of this mesh onto a plane.
+    ///
+    /// `(ox, oy, oz)` is a point on the plane; `(nx, ny, nz)` is its normal.
+    #[wasm_bindgen(js_name = projectToPlane)]
+    pub fn project_to_plane_js(
+        &self,
+        ox: Real, oy: Real, oz: Real,
+        nx: Real, ny: Real, nz: Real,
+    ) -> MeshJs {
+        let origin = Point3::new(ox, oy, oz);
+        let normal = Vector3::new(nx, ny, nz);
+        MeshJs { inner: self.inner.project_to_plane(&origin, &normal) }
+    }
+
+    /// Minimum absolute distance from any mesh vertex to a plane.
+    ///
+    /// `(ox, oy, oz)` is a point on the plane; `(nx, ny, nz)` is its normal.
+    #[wasm_bindgen(js_name = distanceToPlane)]
+    pub fn distance_to_plane_js(
+        &self,
+        ox: Real, oy: Real, oz: Real,
+        nx: Real, ny: Real, nz: Real,
+    ) -> Real {
+        let origin = Point3::new(ox, oy, oz);
+        let normal = Vector3::new(nx, ny, nz);
+        self.inner.distance_to_plane(&origin, &normal)
+    }
+
+    /// Create a mesh from pre-sampled SDF values on a regular grid.
+    ///
+    /// `values` must be laid out as `[z * res_y * res_x + y * res_x + x, ...]`.
+    /// `iso_value` is the isosurface threshold (typically `0.0`).
+    #[cfg(feature = "sdf")]
+    #[wasm_bindgen(js_name = fromSdfValues)]
+    pub fn from_sdf_values_js(
+        values: Float64Array,
+        res_x: usize,
+        res_y: usize,
+        res_z: usize,
+        min_x: Real, min_y: Real, min_z: Real,
+        max_x: Real, max_y: Real, max_z: Real,
+        iso_value: Real,
+    ) -> MeshJs {
+        let vals: Vec<f64> = values.to_vec();
+        let min_pt = Point3::new(min_x, min_y, min_z);
+        let max_pt = Point3::new(max_x, max_y, max_z);
+        let mesh = crate::mesh::Mesh::<String>::from_sdf_values(
+            &vals,
+            (res_x, res_y, res_z),
+            min_pt,
+            max_pt,
+            iso_value,
+            None,
+        );
+        MeshJs { inner: mesh }
+    }
+
+    // ── Edge Projection (HLR) ────────────────────────────────────────────────
+
+    /// BVH-accelerated edge projection with hidden-line removal.
+    ///
+    /// - `(vx, vy, vz)` – view direction (normalised internally).
+    /// - `(ox, oy, oz)` – projection plane origin.
+    /// - `(nx, ny, nz)` – projection plane normal.
+    /// - `feature_angle_deg` – crease angle threshold in degrees (e.g. `15.0`).
+    /// - `n_samples` – HLR ray samples per edge segment (e.g. `8`).
+    /// - `occluders` – additional meshes that can occlude edges of `self`;
+    ///   `self` is always included as an occluder.
+    #[wasm_bindgen(js_name = projectEdges)]
+    pub fn project_edges_js(
+        &self,
+        vx: Real, vy: Real, vz: Real,
+        ox: Real, oy: Real, oz: Real,
+        nx: Real, ny: Real, nz: Real,
+        feature_angle_deg: Real,
+        n_samples: usize,
+        occluders: Vec<MeshJs>,
+    ) -> crate::wasm::edge_projection_js::EdgeProjectionResultJs {
+        let view_normal = Vector3::new(vx, vy, vz);
+        let plane_origin = Point3::new(ox, oy, oz);
+        let plane_normal = Vector3::new(nx, ny, nz);
+        let occ_inner: Vec<crate::mesh::Mesh<String>> = occluders.into_iter()
+            .map(|m| m.inner)
+            .collect();
+        let occ_refs: Vec<&crate::mesh::Mesh<String>> = occ_inner.iter().collect();
+        let result = self.inner.project_edges(
+            &view_normal,
+            &plane_origin,
+            &plane_normal,
+            feature_angle_deg,
+            n_samples,
+            &occ_refs,
+        );
+        crate::wasm::edge_projection_js::EdgeProjectionResultJs { inner: result }
+    }
+
+    /// Slice at a section plane and return visible/hidden edge projections plus
+    /// the cut sketch.
+    ///
+    /// - `(snx, sny, snz)` / `section_offset` – section plane normal + d offset.
+    /// - `(vx, vy, vz)` – view direction.
+    /// - `(ox, oy, oz)` / `(nx, ny, nz)` – projection plane origin + normal.
+    /// - `feature_angle_deg`, `n_samples`, `occluders` – as in `projectEdges`.
+    #[cfg(feature = "sketch")]
+    #[wasm_bindgen(js_name = projectEdgesSection)]
+    pub fn project_edges_section_js(
+        &self,
+        snx: Real, sny: Real, snz: Real,
+        section_offset: Real,
+        vx: Real, vy: Real, vz: Real,
+        ox: Real, oy: Real, oz: Real,
+        nx: Real, ny: Real, nz: Real,
+        feature_angle_deg: Real,
+        n_samples: usize,
+        occluders: Vec<MeshJs>,
+    ) -> crate::wasm::edge_projection_js::SectionElevationResultJs {
+        let section_normal = Vector3::new(snx, sny, snz);
+        let view_normal = Vector3::new(vx, vy, vz);
+        let plane_origin = Point3::new(ox, oy, oz);
+        let plane_normal = Vector3::new(nx, ny, nz);
+        let occ_inner: Vec<crate::mesh::Mesh<String>> = occluders.into_iter()
+            .map(|m| m.inner)
+            .collect();
+        let occ_refs: Vec<&crate::mesh::Mesh<String>> = occ_inner.iter().collect();
+        let r = self.inner.project_edges_section(
+            &section_normal,
+            section_offset,
+            &view_normal,
+            &plane_origin,
+            &plane_normal,
+            feature_angle_deg,
+            n_samples,
+            &occ_refs,
+        );
+        crate::wasm::edge_projection_js::SectionElevationResultJs {
+            visible_polylines: crate::mesh::edge_projection::EdgeProjectionResult {
+                visible_polylines: r.visible_polylines,
+                hidden_polylines: r.hidden_polylines,
+            },
+            cut: r.cut,
+        }
+    }
 }

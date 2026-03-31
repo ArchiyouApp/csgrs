@@ -7,8 +7,8 @@ use nalgebra::{ Point3, Point4, Quaternion, Rotation3, Translation3, Matrix4, Un
 use curvo::prelude::{ NurbsCurve2D, NurbsCurve3D, CompoundCurve2D, Tessellation, BoundingBox, Transformable,
         CompoundCurve3D, Fillet, FilletRadiusOption, FilletRadiusParameterOption,
         CurveOffsetOption, CurveOffsetCornerType, Offset, Intersects, HasIntersection,
-        TrimRange, Split, Boolean, Clip, Invertible,
-        NurbsSurface3D, AdaptiveTessellationOptions };
+        TrimRange, Split, Boolean, Clip, Invertible, Interpolation,
+        NurbsSurface3D, AdaptiveTessellationOptions, CurveIntersectionSolverOptions };
 use curvo::prelude::operation::BooleanOperation;
 
 use super::point_js::{ Point3Js };
@@ -151,7 +151,7 @@ impl NurbsCurve3DJs
             .map(|p| p.inner)
             .collect();
 
-        match NurbsCurve3D::try_interpolate(&control_points, degree) 
+        match NurbsCurve3D::interpolate(&control_points, degree) 
         {
             Ok(curve) => Ok(Self { inner: curve }),
             Err(e) => Err(JsValue::from_str(&format!("Interpolation failed: {:?}", e)))
@@ -406,51 +406,33 @@ impl NurbsCurve3DJs
         }
     }
 
-    /// Offset the curve by a distance in the specified corner type ('sharp','round', 'smooth')
+    /// Offset the curve by a distance in the specified corner type ('sharp','round', 'smooth').
+    /// The curve must already lie in the XY plane (z = 0).
     pub fn offset(&self, distance: Real, corner_type: &str) -> Result<CompoundCurve3DJs, JsValue> {
-
-        // map strings: 'sharp','round','smooth' to CurveOffsetCornerType
         let corner_type = match corner_type {
-            "sharp" => CurveOffsetCornerType::Sharp,
-            "round" => CurveOffsetCornerType::Round,
+            "sharp"  => CurveOffsetCornerType::Sharp,
+            "round"  => CurveOffsetCornerType::Round,
             "smooth" => CurveOffsetCornerType::Smooth,
-            _ => CurveOffsetCornerType::Sharp,
+            _        => CurveOffsetCornerType::Sharp,
         };
 
-        // Check if curve is planar, get plane axes
-        let plane = self.get_on_plane(None);
-        if plane.len() != 3 {
-            return Err(JsValue::from_str("Cannot offset a non-planar 3D curve"));
-        }
-        let local_x: Vector3<Real> = (&plane[1]).into();
-        let local_y: Vector3<Real> = (&plane[2]).into();
-
-        // Use first control point as projection origin
-        let first_cp = self.inner.control_points()[0];
-        let w = first_cp.w;
-        let origin = Point3::new(first_cp.x / w, first_cp.y / w, first_cp.z / w);
-
-        // Project 3D curve to 2D
-        let curve_2d = self.project_to_2d(&origin, &local_x, &local_y)
-            .map_err(|e| JsValue::from_str(&e))?;
+        let curve_2d = self.cast_to_2d(1e-6)
+            .map_err(|e| JsValue::from_str(&format!("Cannot offset: {}", e)))?;
 
         let option = CurveOffsetOption::default()
             .with_corner_type(corner_type)
             .with_distance(distance)
             .with_normal_tolerance(1e-4);
 
-        // Offset in 2D
         let offset_results = curve_2d.offset(option)
-            .map_err(|e| JsValue::from_str(&format!("Failed to offset curve: {:?}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Offset failed: {:?}", e)))?;
 
-        // Convert each 2D offset span back to 3D and collect into a single CompoundCurve3D
         let mut all_3d_spans: Vec<NurbsCurve3D<Real>> = Vec::new();
         for compound_2d in &offset_results {
             for span_2d in compound_2d.spans() {
-                // Build a temporary wrapper to use from_2d
-                let curve_3d = NurbsCurve3DJs::from_2d(&span_2d, &origin, &local_x, &local_y)
+                let span_3d = NurbsCurve3DJs::from_2d_xy(&span_2d)
                     .map_err(|e| JsValue::from_str(&e))?;
-                all_3d_spans.push(curve_3d.inner);
+                all_3d_spans.push(span_3d.inner);
             }
         }
 
@@ -458,11 +440,9 @@ impl NurbsCurve3DJs
             return Err(JsValue::from_str("Offset produced no curves"));
         }
 
-        // If single span, wrap it into a CompoundCurve3D; otherwise join them
-        match CompoundCurve3D::try_new(all_3d_spans) {
-            Ok(compound) => Ok(CompoundCurve3DJs::from(compound)),
-            Err(e) => Err(JsValue::from_str(&format!("Failed to create compound curve from offset result: {:?}", e)))
-        }
+        CompoundCurve3D::try_new(all_3d_spans)
+            .map(CompoundCurve3DJs::from)
+            .map_err(|e| JsValue::from_str(&format!("Failed to build offset result: {:?}", e)))
     }
     
 
@@ -716,8 +696,19 @@ impl NurbsCurve3DJs
         ensure_closed_nurbs_2d(&mut self_2d, 1e-8);
         ensure_closed_nurbs_2d(&mut other_2d, 1e-8);
 
-        let clip = self_2d.boolean(op, &other_2d, None)
-            .map_err(|e| JsValue::from_str(&format!("booleanCurve({}) failed: {:?}", operation, e)))?;
+        let clip = match self_2d.boolean(op, &other_2d, Some(default_solver_options())) {
+            Ok(c) => c,
+            Err(e) => {
+                let err_msg = format!("{:?}", e);
+                if err_msg.contains("odd number of intersections") {
+                    let perturbed = perturb_nurbs_2d(&other_2d, 1e-5);
+                    self_2d.boolean(op, &perturbed, Some(default_solver_options()))
+                        .map_err(|e2| JsValue::from_str(&format!("booleanCurve({}) failed after retry: {:?}", operation, e2)))?
+                } else {
+                    return Err(JsValue::from_str(&format!("booleanCurve({}) failed: {}", operation, err_msg)));
+                }
+            }
+        };
 
         clip_regions_to_3d(clip, &origin, &local_x, &local_y)
     }
@@ -744,8 +735,20 @@ impl NurbsCurve3DJs
         let self_compound_2d = CompoundCurve2D::try_new(vec![self_2d])
             .map_err(|e| JsValue::from_str(&format!("Failed to wrap curve as compound: {:?}", e)))?;
 
-        let clip = self_compound_2d.boolean(op, &other_2d, None)
-            .map_err(|e| JsValue::from_str(&format!("booleanCompoundCurve({}) failed: {:?}", operation, e)))?;
+        let clip = match self_compound_2d.boolean(op, &other_2d, Some(default_solver_options())) {
+            Ok(c) => c,
+            Err(e) => {
+                let err_msg = format!("{:?}", e);
+                if err_msg.contains("odd number of intersections") {
+                    let perturbed = perturb_compound_2d(&other_2d, 1e-5)
+                        .map_err(|e2| JsValue::from_str(&e2))?;
+                    self_compound_2d.boolean(op, &perturbed, Some(default_solver_options()))
+                        .map_err(|e2| JsValue::from_str(&format!("booleanCompoundCurve({}) failed after retry: {:?}", operation, e2)))?
+                } else {
+                    return Err(JsValue::from_str(&format!("booleanCompoundCurve({}) failed: {}", operation, err_msg)));
+                }
+            }
+        };
 
         clip_regions_to_3d(clip, &origin, &local_x, &local_y)
     }
@@ -825,6 +828,36 @@ impl NurbsCurve3DJs {
 
         NurbsCurve2D::try_new(degree, control_points_2d, knots)
             .map_err(|e| format!("Failed to project curve to 2D: {:?}", e))
+    }
+
+    /// Cast a 3D NURBS curve that already lies in the XY plane (z ≈ 0) to a NurbsCurve2D
+    /// by simply dropping the Z homogeneous component.
+    /// Returns an error if any control point has |z| > tol.
+    pub(crate) fn cast_to_2d(&self, tol: Real) -> Result<NurbsCurve2D<Real>, String> {
+        for p4 in self.inner.control_points() {
+            let z = p4.z / p4.w;
+            if z.abs() > tol {
+                return Err(format!("cast_to_2d: curve is not in XY plane — control point z = {:.6}", z));
+            }
+        }
+        // Drop Z: Point4(x*w, y*w, z*w, w) → Point3(x*w, y*w, w)
+        let cps_2d: Vec<Point3<Real>> = self.inner.control_points().iter()
+            .map(|p4| Point3::new(p4.x, p4.y, p4.w))
+            .collect();
+        NurbsCurve2D::try_new(self.inner.degree(), cps_2d, self.inner.knots().to_vec())
+            .map_err(|e| format!("cast_to_2d: failed to construct NurbsCurve2D: {:?}", e))
+    }
+
+    /// Construct a 3D NURBS curve from a 2D curve by adding z = 0 to every control point.
+    #[allow(dead_code)]
+    pub(crate) fn from_2d_xy(curve_2d: &NurbsCurve2D<Real>) -> Result<NurbsCurve3DJs, String> {
+        // Point3(x*w, y*w, w) → Point4(x*w, y*w, 0, w)
+        let cps_3d: Vec<Point4<Real>> = curve_2d.control_points().iter()
+            .map(|p3| Point4::new(p3.x, p3.y, 0.0, p3.z))
+            .collect();
+        NurbsCurve3D::try_new(curve_2d.degree(), cps_3d, curve_2d.knots().to_vec())
+            .map(|c| NurbsCurve3DJs { inner: c })
+            .map_err(|e| format!("from_2d_xy: failed to construct NurbsCurve3D: {:?}", e))
     }
 
     /// Reconstruct a 3D NURBS curve from a 2D curve and its projection plane.
@@ -1074,57 +1107,33 @@ impl CompoundCurve3DJs
             .collect();
     }
 
-    /// Offset the compound curve by a distance with the specified corner type ('sharp','round','smooth')
+    /// Offset the compound curve by a distance with the specified corner type ('sharp','round','smooth').
+    /// The curve must already lie in the XY plane (z = 0).
     pub fn offset(&self, distance: Real, corner_type: &str) -> Result<CompoundCurve3DJs, JsValue> {
-        let corner_type = match corner_type {
-            "sharp" => CurveOffsetCornerType::Sharp,
-            "round" => CurveOffsetCornerType::Round,
+        let corner_type_enum = match corner_type {
+            "sharp"  => CurveOffsetCornerType::Sharp,
+            "round"  => CurveOffsetCornerType::Round,
             "smooth" => CurveOffsetCornerType::Smooth,
-            _ => CurveOffsetCornerType::Sharp,
+            _        => CurveOffsetCornerType::Sharp,
         };
 
-        // Check planarity using control points from all spans
-        let spans_js: Vec<NurbsCurve3DJs> = self.inner.clone().into_spans().iter()
-            .map(|s| NurbsCurve3DJs::from(s.clone()))
-            .collect();
-
-        if spans_js.is_empty() {
-            return Err(JsValue::from_str("Cannot offset an empty compound curve"));
-        }
-
-        // Use the first span's plane
-        let plane = spans_js[0].get_on_plane(None);
-        if plane.len() != 3 {
-            return Err(JsValue::from_str("Cannot offset a non-planar compound curve"));
-        }
-        let local_x: Vector3<Real> = (&plane[1]).into();
-        let local_y: Vector3<Real> = (&plane[2]).into();
-
-        // Use first control point as projection origin
-        let first_cp = spans_js[0].inner.control_points()[0];
-        let w = first_cp.w;
-        let origin = Point3::new(first_cp.x / w, first_cp.y / w, first_cp.z / w);
-
-        // Project compound curve to 2D
-        let compound_2d = self.project_to_2d(&origin, &local_x, &local_y)
-            .map_err(|e| JsValue::from_str(&e))?;
+        let compound_2d = self.cast_to_2d(1e-6)
+            .map_err(|e| JsValue::from_str(&format!("Cannot offset: {}", e)))?;
 
         let option = CurveOffsetOption::default()
-            .with_corner_type(corner_type)
+            .with_corner_type(corner_type_enum)
             .with_distance(distance)
             .with_normal_tolerance(1e-4);
 
-        // Offset in 2D
         let offset_results = compound_2d.offset(option)
-            .map_err(|e| JsValue::from_str(&format!("Failed to offset compound curve: {:?}", e)))?;
+            .map_err(|e| JsValue::from_str(&format!("Offset failed: {:?}", e)))?;
 
-        // Convert 2D offset results back to 3D
         let mut all_3d_spans: Vec<NurbsCurve3D<Real>> = Vec::new();
-        for compound_2d_result in &offset_results {
-            for span_2d in compound_2d_result.spans() {
-                let curve_3d = NurbsCurve3DJs::from_2d(&span_2d, &origin, &local_x, &local_y)
+        for compound_2d in &offset_results {
+            for span_2d in compound_2d.spans() {
+                let span_3d = NurbsCurve3DJs::from_2d_xy(&span_2d)
                     .map_err(|e| JsValue::from_str(&e))?;
-                all_3d_spans.push(curve_3d.inner);
+                all_3d_spans.push(span_3d.inner);
             }
         }
 
@@ -1132,10 +1141,9 @@ impl CompoundCurve3DJs
             return Err(JsValue::from_str("Offset produced no curves"));
         }
 
-        match CompoundCurve3D::try_new(all_3d_spans) {
-            Ok(compound) => Ok(CompoundCurve3DJs::from(compound)),
-            Err(e) => Err(JsValue::from_str(&format!("Failed to create compound curve from offset result: {:?}", e)))
-        }
+        CompoundCurve3D::try_new(all_3d_spans)
+            .map(CompoundCurve3DJs::from)
+            .map_err(|e| JsValue::from_str(&format!("Failed to build offset result: {:?}", e)))
     }
 
     /// Merge consecutive collinear degree-1 spans into single polyline spans.
@@ -1459,8 +1467,19 @@ impl CompoundCurve3DJs
             .map_err(|e| JsValue::from_str(&e))?;
         ensure_closed_nurbs_2d(&mut other_2d, 1e-8);
 
-        let clip = self_2d.boolean(op, &other_2d, None)
-            .map_err(|e| JsValue::from_str(&format!("booleanCurve({}) failed: {:?}", operation, e)))?;
+        let clip = match self_2d.boolean(op, &other_2d, Some(default_solver_options())) {
+            Ok(c) => c,
+            Err(e) => {
+                let err_msg = format!("{:?}", e);
+                if err_msg.contains("odd number of intersections") {
+                    let perturbed = perturb_nurbs_2d(&other_2d, 1e-5);
+                    self_2d.boolean(op, &perturbed, Some(default_solver_options()))
+                        .map_err(|e2| JsValue::from_str(&format!("booleanCurve({}) failed after retry: {:?}", operation, e2)))?
+                } else {
+                    return Err(JsValue::from_str(&format!("booleanCurve({}) failed: {}", operation, err_msg)));
+                }
+            }
+        };
 
         clip_regions_to_3d(clip, &origin, &local_x, &local_y)
     }
@@ -1484,8 +1503,20 @@ impl CompoundCurve3DJs
         let other_2d = ensure_closed_compound_2d(other_2d, 1e-8)
             .map_err(|e| JsValue::from_str(&e))?;
 
-        let clip = self_2d.boolean(op, &other_2d, None)
-            .map_err(|e| JsValue::from_str(&format!("booleanCompoundCurve({}) failed: {:?}", operation, e)))?;
+        let clip = match self_2d.boolean(op, &other_2d, Some(default_solver_options())) {
+            Ok(c) => c,
+            Err(e) => {
+                let err_msg = format!("{:?}", e);
+                if err_msg.contains("odd number of intersections") {
+                    let perturbed = perturb_compound_2d(&other_2d, 1e-5)
+                        .map_err(|e2| JsValue::from_str(&e2))?;
+                    self_2d.boolean(op, &perturbed, Some(default_solver_options()))
+                        .map_err(|e2| JsValue::from_str(&format!("booleanCompoundCurve({}) failed after retry: {:?}", operation, e2)))?
+                } else {
+                    return Err(JsValue::from_str(&format!("booleanCompoundCurve({}) failed: {}", operation, err_msg)));
+                }
+            }
+        };
 
         clip_regions_to_3d(clip, &origin, &local_x, &local_y)
     }
@@ -1521,6 +1552,39 @@ impl CompoundCurve3DJs
 
 // COMPOUND CURVE3D JS - NON-WASM
 impl CompoundCurve3DJs {
+    /// Cast a compound curve that already lies in the XY plane (z ≈ 0) to a CompoundCurve2D.
+    /// Each span is cast individually via NurbsCurve3DJs::cast_to_2d.
+    pub(crate) fn cast_to_2d(&self, tol: Real) -> Result<CompoundCurve2D<Real>, String> {
+        let spans_2d: Vec<NurbsCurve2D<Real>> = self.inner.clone().into_spans().iter()
+            .enumerate()
+            .map(|(i, span)| {
+                NurbsCurve3DJs { inner: span.clone() }
+                    .cast_to_2d(tol)
+                    .map_err(|e| format!("span {}: {}", i, e))
+            })
+            .collect::<Result<_, _>>()?;
+
+        CompoundCurve2D::try_new(spans_2d)
+            .map_err(|e| format!("cast_to_2d: failed to construct CompoundCurve2D: {:?}", e))
+    }
+
+    /// Construct a 3D compound curve from a 2D compound curve by adding z = 0 to every span.
+    #[allow(dead_code)]
+    pub(crate) fn from_2d_xy(compound_2d: &CompoundCurve2D<Real>) -> Result<CompoundCurve3DJs, String> {
+        let spans_3d: Vec<NurbsCurve3D<Real>> = compound_2d.spans().iter()
+            .enumerate()
+            .map(|(i, span_2d)| {
+                NurbsCurve3DJs::from_2d_xy(span_2d)
+                    .map(|c| c.inner)
+                    .map_err(|e| format!("span {}: {}", i, e))
+            })
+            .collect::<Result<_, _>>()?;
+
+        CompoundCurve3D::try_new(spans_3d)
+            .map(CompoundCurve3DJs::from)
+            .map_err(|e| format!("from_2d_xy: failed to construct CompoundCurve3D: {:?}", e))
+    }
+
     /// Project this 3D compound curve onto a 2D plane, producing a CompoundCurve2D.
     /// Each span is projected individually and then combined.
     pub(crate) fn project_to_2d(&self, origin: &Point3<Real>, local_x: &Vector3<Real>, local_y: &Vector3<Real>) -> Result<CompoundCurve2D<Real>, String> {
@@ -1581,10 +1645,7 @@ impl NurbsSurfaceJs {
         use js_sys::{Float64Array, Object, Reflect, Uint32Array};
 
         let tol = tolerance.unwrap_or(1e-2);
-        let options = AdaptiveTessellationOptions {
-            norm_tolerance: tol,
-            ..Default::default()
-        };
+        let options = AdaptiveTessellationOptions::<f64>::default().with_norm_tolerance(tol);
         let tess = self.inner.tessellate(Some(options));
 
         let pts = tess.points();
@@ -1754,6 +1815,7 @@ fn parse_boolean_operation(op: &str) -> Result<BooleanOperation, JsValue> {
     }
 }
 
+
 /// Extract the projection plane (origin, local_x, local_y) from a NurbsCurve3DJs.
 /// Fails if the curve is not planar.
 fn get_plane_from_nurbs(curve: &NurbsCurve3DJs) -> Result<(Point3<Real>, Vector3<Real>, Vector3<Real>), JsValue> {
@@ -1877,3 +1939,199 @@ fn clip_regions_to_3d(
     }
     Ok(results)
 }
+
+/// Create solver options with tighter tolerances for better degenerate-case handling.
+fn default_solver_options() -> CurveIntersectionSolverOptions<Real> {
+    CurveIntersectionSolverOptions::default()
+        .with_minimum_distance(1e-6)
+        .with_cost_tolerance(1e-10)
+        .with_step_size_tolerance(1e-10)
+}
+
+/// Perturb a NurbsCurve2D by translating control points by a small epsilon.
+/// Returns a new curve; the original is not modified.
+fn perturb_nurbs_2d(curve: &NurbsCurve2D<Real>, eps: Real) -> NurbsCurve2D<Real> {
+    let mut perturbed = curve.clone();
+    for p in perturbed.control_points_iter_mut() {
+        let w = p.z;
+        p.x += eps * w;
+        p.y += eps * w;
+    }
+    perturbed
+}
+
+/// Perturb a CompoundCurve2D by translating each span's control points by a small epsilon.
+/// Returns a new compound curve; the original is not modified.
+fn perturb_compound_2d(compound: &CompoundCurve2D<Real>, eps: Real) -> Result<CompoundCurve2D<Real>, String> {
+    let perturbed_spans: Vec<NurbsCurve2D<Real>> = compound.spans()
+        .iter()
+        .map(|span| perturb_nurbs_2d(span, eps))
+        .collect();
+    CompoundCurve2D::try_new(perturbed_spans)
+        .map_err(|e| format!("Failed to create perturbed compound curve: {:?}", e))
+}
+
+/* 
+/// Offset a CompoundCurve2D by offsetting each span individually and creating
+/// sharp corners between adjacent offset results using tangent-based line intersection.
+/// This handles mixed-degree compounds that Curvo's native offset cannot process.
+/// TODO: Move this logic into the Curvo layer (patch CompoundCurve2D::offset) for
+/// proper support of all corner types (round, smooth, chamfer) on mixed-degree spans.
+fn offset_compound_per_span(
+    compound: &CompoundCurve2D<Real>,
+    option: &CurveOffsetOption<Real>,
+) -> Result<Vec<NurbsCurve2D<Real>>, String> {
+    let spans = compound.spans();
+    if spans.is_empty() {
+        return Err("Cannot offset empty compound curve".to_string());
+    }
+
+    // Offset each span individually — this works for any degree
+    let mut offset_spans: Vec<Vec<NurbsCurve2D<Real>>> = Vec::new();
+    for span in spans {
+        let results = span.offset(option.clone())
+            .map_err(|e| format!("Failed to offset span: {:?}", e))?;
+        let flat: Vec<NurbsCurve2D<Real>> = results
+            .into_iter()
+            .flat_map(|c| c.into_spans())
+            .collect();
+        offset_spans.push(flat);
+    }
+
+    // Connect adjacent offset results with sharp corners
+    let mut all_spans: Vec<NurbsCurve2D<Real>> = Vec::new();
+    let is_closed = compound.is_closed(None);
+    let n = offset_spans.len();
+
+    for i in 0..n {
+        // Add all spans of this offset result
+        for span in &offset_spans[i] {
+            all_spans.push(span.clone());
+        }
+
+        // Determine the next index for corner creation
+        let next_i = if i + 1 < n {
+            Some(i + 1)
+        } else if is_closed {
+            Some(0)
+        } else {
+            None
+        };
+
+        if let Some(j) = next_i {
+            // Get the last span of current offset and first span of next offset
+            let last_span = match offset_spans[i].last() {
+                Some(s) => s,
+                None => continue,
+            };
+            let next_span = match offset_spans[j].first() {
+                Some(s) => s,
+                None => continue,
+            };
+
+            // Get endpoint of last span and startpoint of next span
+            let (_, t_end) = last_span.knots_domain();
+            let end_pt = last_span.point_at(t_end);
+            let (t_start, _) = next_span.knots_domain();
+            let start_pt = next_span.point_at(t_start);
+
+            let gap = ((end_pt.x - start_pt.x).powi(2) + (end_pt.y - start_pt.y).powi(2)).sqrt();
+
+            if gap < 1e-6 {
+                // Already connected, no corner needed
+                continue;
+            }
+
+            // Compute tangent directions at the endpoints
+            let end_tan = last_span.tangent_at(t_end);
+            let start_tan = next_span.tangent_at(t_start);
+
+            // Try sharp corner: extend tangent lines and intersect
+            if let Some(corner_pt) = tangent_line_intersection(
+                &end_pt, &end_tan, &start_pt, &start_tan,
+                option.distance().abs() * 10.0,
+            ) {
+                // Create polyline corner: endpoint → intersection → startpoint
+                let corner = NurbsCurve2D::polyline(
+                    &[end_pt, corner_pt, start_pt],
+                    false,
+                );
+                all_spans.push(corner);
+            } else {
+                // Fallback: direct straight line connection
+                let connector = NurbsCurve2D::polyline(&[end_pt, start_pt], false);
+                all_spans.push(connector);
+            }
+        }
+    }
+
+    Ok(all_spans)
+} */
+
+/// Degree-elevate a single-segment degree-1 NurbsCurve2D to degree-2.
+/// The geometry is preserved exactly: the line becomes a quadratic Bezier with a
+/// midpoint control point. For polyline NURBS with more than 2 control points,
+/// returns the curve unchanged (can't trivially elevate multi-span polylines).
+#[allow(dead_code)]
+fn elevate_degree1_span_2d(curve: &NurbsCurve2D<Real>) -> NurbsCurve2D<Real> {
+    if curve.degree() != 1 {
+        return curve.clone();
+    }
+    let cps = curve.control_points();
+    if cps.len() != 2 {
+        return curve.clone();
+    }
+    let p0 = cps[0];
+    let p1 = cps[1];
+    // Midpoint in homogeneous 2D space (Point3: x*w, y*w, w)
+    let p_mid = Point3::new((p0.x + p1.x) * 0.5, (p0.y + p1.y) * 0.5, (p0.z + p1.z) * 0.5);
+    let knots = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+    NurbsCurve2D::try_new(2, vec![p0, p_mid, p1], knots)
+        .unwrap_or_else(|_| curve.clone())
+}
+
+/// Elevate all degree-1 spans in a CompoundCurve2D to degree-2.
+/// Non-degree-1 spans are preserved unchanged.
+/// Returns None if the resulting compound cannot be constructed (connectivity failure).
+#[allow(dead_code)]
+fn homogenize_degree_to_2(compound: &CompoundCurve2D<Real>) -> Option<CompoundCurve2D<Real>> {
+    let elevated: Vec<NurbsCurve2D<Real>> = compound.spans()
+        .iter()
+        .map(|span| elevate_degree1_span_2d(span))
+        .collect();
+    CompoundCurve2D::try_new(elevated).ok()
+}
+
+/*
+/// Find the intersection of two tangent lines extending from endpoints.
+/// Returns None if lines are nearly parallel or intersection is too far away.
+fn tangent_line_intersection(
+    p0: &Point2<Real>,
+    d0: &Vector2<Real>,
+    p1: &Point2<Real>,
+    d1: &Vector2<Real>,
+    max_dist: Real,
+) -> Option<Point2<Real>> {
+    // Solve: p0 + t*d0 = p1 + s*d1
+    // Cross product denominator: d0.x * d1.y - d0.y * d1.x
+    let denom = d0.x * d1.y - d0.y * d1.x;
+    if denom.abs() < 1e-10 {
+        return None; // Parallel lines
+    }
+
+    let dp = Point2::new(p1.x - p0.x, p1.y - p0.y);
+    let t = (dp.x * d1.y - dp.y * d1.x) / denom;
+
+    let intersection = Point2::new(p0.x + t * d0.x, p0.y + t * d0.y);
+
+    // Check distance from both endpoints to avoid wildly diverging corners
+    let dist0 = ((intersection.x - p0.x).powi(2) + (intersection.y - p0.y).powi(2)).sqrt();
+    let dist1 = ((intersection.x - p1.x).powi(2) + (intersection.y - p1.y).powi(2)).sqrt();
+
+    if dist0 > max_dist || dist1 > max_dist {
+        return None;
+    }
+
+    Some(intersection)
+}
+*/

@@ -3,7 +3,7 @@
 use crate::float_types::{
     parry3d::{
         bounding_volume::Aabb,
-        query::RayCast,
+        query::{PointQuery, RayCast},
         shape::Shape,
     },
     rapier3d::prelude::{
@@ -45,6 +45,9 @@ pub mod bsp;
 
 #[cfg(feature = "parallel")]
 pub mod bsp_parallel;
+
+pub mod bvh;
+pub mod edge_projection;
 
 #[cfg(feature = "chull")]
 pub mod convex_hull;
@@ -533,6 +536,196 @@ impl<S: Clone + Send + Sync + Debug> Mesh<S> {
         mesh.insert_indices(Indices::U32(indices));
 
         mesh
+    }
+}
+
+// ── BVH-accelerated spatial queries ──────────────────────────────────────────
+//
+// These methods build a Parry `TriMesh` on demand.  Parry's TriMesh maintains
+// an internal QBVH (Bounding Volume Hierarchy) that accelerates ray casts,
+// point projections, and shape–shape queries to O(log n) or better.
+impl<S: Clone + Send + Sync + Debug> Mesh<S> {
+    /// BVH-accelerated first-hit raycast.
+    ///
+    /// Returns the closest intersection with `origin + t * direction` where
+    /// `t ∈ [0, max_dist]`, or `None` if no hit.
+    pub fn raycast_first(
+        &self,
+        origin: &Point3<Real>,
+        direction: &Vector3<Real>,
+        max_dist: Real,
+    ) -> Option<bvh::RaycastHit> {
+        let trimesh = self.to_trimesh()?;
+        let dir = direction.normalize();
+        let ray = Ray::new(*origin, dir);
+        let hit = trimesh.cast_local_ray_and_get_normal(&ray, max_dist, true)?;
+        let point = Point3::from(ray.origin.coords + ray.dir * hit.time_of_impact);
+        Some(bvh::RaycastHit {
+            point,
+            normal: hit.normal,
+            distance: hit.time_of_impact,
+            triangle_index: 0, // TODO: extract once FeatureId is in scope
+        })
+    }
+
+    /// All-hits raycast: returns every triangle intersection along the ray.
+    ///
+    /// Iterates all triangles of the mesh and returns a `RaycastHit` for each
+    /// one that is pierced by `origin + t * direction` (t ∈ [0, max_dist]).
+    /// Results are sorted by ascending distance and deduplicated within
+    /// floating-point tolerance.
+    pub fn raycast_all(
+        &self,
+        origin: &Point3<Real>,
+        direction: &Vector3<Real>,
+        max_dist: Real,
+    ) -> Vec<bvh::RaycastHit> {
+        let dir = direction.normalize();
+        let ray = Ray::new(*origin, dir);
+        let iso = Isometry3::identity();
+
+        let mut hits: Vec<bvh::RaycastHit> = self
+            .polygons
+            .iter()
+            .flat_map(|poly| poly.triangulate())
+            .filter_map(|tri| {
+                let triangle = Triangle::new(tri[0].position, tri[1].position, tri[2].position);
+                triangle
+                    .cast_ray_and_get_normal(&iso, &ray, max_dist, false)
+                    .map(|hit| {
+                        let point = Point3::from(ray.origin.coords + ray.dir * hit.time_of_impact);
+                        bvh::RaycastHit {
+                            point,
+                            normal: hit.normal,
+                            distance: hit.time_of_impact,
+                            triangle_index: 0,
+                        }
+                    })
+            })
+            .collect();
+
+        hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+        hits.dedup_by(|a, b| (a.distance - b.distance).abs() < tolerance());
+        hits
+    }
+
+    /// Project a query point onto the nearest mesh surface.
+    ///
+    /// Uses Parry's `PointQuery` (BVH-accelerated) for the closest surface
+    /// point, then derives the outward normal from the signed displacement.
+    pub fn closest_point(&self, query: &Point3<Real>) -> Option<bvh::ClosestPointResult> {
+        let trimesh = self.to_trimesh()?;
+        let proj = trimesh.project_local_point(query, true /* solid */);
+        let diff = *query - proj.point;
+        let dist = diff.norm();
+        // Outward normal: from surface toward query; reversed inside the mesh.
+        let normal = if dist < tolerance() {
+            Vector3::z()
+        } else if proj.is_inside {
+            -diff.normalize()
+        } else {
+            diff.normalize()
+        };
+        Some(bvh::ClosestPointResult {
+            point: proj.point,
+            normal,
+            distance: dist,
+            is_inside: proj.is_inside,
+        })
+    }
+
+    /// Sample the signed distance field at a query point.
+    ///
+    /// Returns a **negative** value if the point is inside the mesh, positive
+    /// if outside.  Wraps [`closest_point`](Self::closest_point).
+    pub fn sample_sdf(&self, query: &Point3<Real>) -> Option<bvh::SdfSample> {
+        let r = self.closest_point(query)?;
+        let signed = if r.is_inside { -r.distance } else { r.distance };
+        Some(bvh::SdfSample {
+            distance: signed,
+            is_inside: r.is_inside,
+            closest_point: r.point,
+        })
+    }
+
+    /// Test whether this mesh physically overlaps another.
+    ///
+    /// Uses Parry's BVH-accelerated TriMesh–TriMesh intersection test.
+    /// Returns `false` if either mesh can't be tessellated.
+    pub fn hits(&self, other: &Mesh<S>) -> bool {
+        match (self.to_trimesh(), other.to_trimesh()) {
+            (Some(t1), Some(t2)) => {
+                let iso = Isometry3::identity();
+                crate::float_types::parry3d::query::intersection_test(
+                    &iso, &t1, &iso, &t2,
+                )
+                .unwrap_or(false)
+            }
+            _ => false,
+        }
+    }
+
+    /// Minimum separating distance between this mesh and another.
+    ///
+    /// Returns `0.0` if they intersect, `Real::MAX` on error.
+    pub fn distance_to_mesh(&self, other: &Mesh<S>) -> Real {
+        match (self.to_trimesh(), other.to_trimesh()) {
+            (Some(t1), Some(t2)) => {
+                let iso = Isometry3::identity();
+                crate::float_types::parry3d::query::distance(
+                    &iso, &t1, &iso, &t2,
+                )
+                .unwrap_or(Real::MAX)
+            }
+            _ => Real::MAX,
+        }
+    }
+
+    /// Orthographically project every vertex of this mesh onto a plane.
+    ///
+    /// Produces a new `Mesh` whose vertices all lie on the plane defined by
+    /// `plane_origin` and `plane_normal`.  Useful for shadow/elevation
+    /// projections.
+    pub fn project_to_plane(
+        &self,
+        plane_origin: &Point3<Real>,
+        plane_normal: &Vector3<Real>,
+    ) -> Mesh<S> {
+        let n = plane_normal.normalize();
+        let polys: Vec<Polygon<S>> = self
+            .polygons
+            .iter()
+            .map(|poly| {
+                let verts: Vec<Vertex> = poly
+                    .vertices
+                    .iter()
+                    .map(|v| {
+                        // P' = P - dot(P - O, N) * N
+                        let d = (v.position - plane_origin).dot(&n);
+                        let projected = Point3::from(v.position - n * d);
+                        Vertex::new(projected, n)
+                    })
+                    .collect();
+                Polygon::new(verts, poly.metadata.clone())
+            })
+            .collect();
+        Mesh::from_polygons(&polys, self.metadata.clone())
+    }
+
+    /// Minimum absolute distance from any vertex of this mesh to a plane.
+    ///
+    /// Returns `0.0` if any vertex lies on the plane.
+    pub fn distance_to_plane(
+        &self,
+        plane_origin: &Point3<Real>,
+        plane_normal: &Vector3<Real>,
+    ) -> Real {
+        let n = plane_normal.normalize();
+        self.polygons
+            .iter()
+            .flat_map(|p| p.vertices.iter())
+            .map(|v| (v.position - plane_origin).dot(&n).abs())
+            .fold(Real::MAX, |acc, d| if d < acc { d } else { acc })
     }
 }
 

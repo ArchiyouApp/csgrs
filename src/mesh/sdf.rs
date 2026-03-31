@@ -216,4 +216,86 @@ impl<S: Clone + Debug + Send + Sync> Mesh<S> {
         // Return as a Mesh
         Mesh::from_polygons(&triangles, metadata)
     }
+
+    /// Create a mesh from pre-sampled SDF values on a regular grid.
+    ///
+    /// This is the WASM-friendly counterpart to [`sdf`](Self::sdf): the caller
+    /// samples the field on the TypeScript/JS side (avoiding `Fn` closure
+    /// serialisation issues) and passes the resulting array here.
+    ///
+    /// `values` must have exactly `res_x * res_y * res_z` elements ordered as
+    /// `z * res_y * res_x + y * res_x + x`.  Values equal to `iso_value` mark
+    /// the isosurface.
+    pub fn from_sdf_values(
+        values: &[f64],
+        resolution: (usize, usize, usize),
+        min_pt: Point3<Real>,
+        max_pt: Point3<Real>,
+        iso_value: Real,
+        metadata: Option<S>,
+    ) -> Mesh<S> {
+        let nx = resolution.0.max(2) as u32;
+        let ny = resolution.1.max(2) as u32;
+        let nz = resolution.2.max(2) as u32;
+        let expected = (nx * ny * nz) as usize;
+
+        // Shift values so the isosurface crosses zero.
+        let field_values: Vec<f32> = values
+            .iter()
+            .take(expected)
+            .map(|&v| (v - iso_value as f64) as f32)
+            .chain(std::iter::repeat(1e10_f32)) // pad if caller is short
+            .take(expected)
+            .collect();
+
+        let dx = (max_pt.x - min_pt.x) / (nx as Real - 1.0);
+        let dy = (max_pt.y - min_pt.y) / (ny as Real - 1.0);
+        let dz = (max_pt.z - min_pt.z) / (nz as Real - 1.0);
+
+        #[derive(Clone, Copy)]
+        struct GridShape { nx: u32, ny: u32, nz: u32 }
+        impl fast_surface_nets::ndshape::Shape<3> for GridShape {
+            type Coord = u32;
+            fn as_array(&self) -> [u32; 3] { [self.nx, self.ny, self.nz] }
+            fn size(&self) -> u32 { self.nx * self.ny * self.nz }
+            fn usize(&self) -> usize { (self.nx * self.ny * self.nz) as usize }
+            fn linearize(&self, [x, y, z]: [u32; 3]) -> u32 { (z * self.ny + y) * self.nx + x }
+            fn delinearize(&self, i: u32) -> [u32; 3] {
+                let x = i % self.nx; let yz = i / self.nx;
+                let y = yz % self.ny; let z = yz / self.ny;
+                [x, y, z]
+            }
+        }
+
+        let shape = GridShape { nx, ny, nz };
+        let mut sn_buffer = SurfaceNetsBuffer::default();
+
+        surface_nets(
+            &field_values,
+            &shape,
+            [0, 0, 0],
+            [nx - 1, ny - 1, nz - 1],
+            &mut sn_buffer,
+        );
+
+        #[inline] fn pt_finite(p: &Point3<Real>) -> bool { p.coords.iter().all(|c| c.is_finite()) }
+        #[inline] fn v3_finite(v: &Vector3<Real>) -> bool { v.iter().all(|c| c.is_finite()) }
+
+        let mut triangles = Vec::with_capacity(sn_buffer.indices.len() / 3);
+        for tri in sn_buffer.indices.chunks_exact(3) {
+            let [i0, i1, i2] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
+            let [p0i, p1i, p2i] = [sn_buffer.positions[i0], sn_buffer.positions[i1], sn_buffer.positions[i2]];
+            let p0 = Point3::new(min_pt.x + p0i[0] as Real * dx, min_pt.y + p0i[1] as Real * dy, min_pt.z + p0i[2] as Real * dz);
+            let p1 = Point3::new(min_pt.x + p1i[0] as Real * dx, min_pt.y + p1i[1] as Real * dy, min_pt.z + p1i[2] as Real * dz);
+            let p2 = Point3::new(min_pt.x + p2i[0] as Real * dx, min_pt.y + p2i[1] as Real * dy, min_pt.z + p2i[2] as Real * dz);
+            let [n0, n1, n2] = [sn_buffer.normals[i0], sn_buffer.normals[i1], sn_buffer.normals[i2]];
+            let n0v = Vector3::new(n0[0] as Real, n0[1] as Real, n0[2] as Real);
+            let n1v = Vector3::new(n1[0] as Real, n1[1] as Real, n1[2] as Real);
+            let n2v = Vector3::new(n2[0] as Real, n2[1] as Real, n2[2] as Real);
+            if !(pt_finite(&p0) && pt_finite(&p1) && pt_finite(&p2) && v3_finite(&n0v) && v3_finite(&n1v) && v3_finite(&n2v)) { continue; }
+            triangles.push(Polygon::new(vec![Vertex::new(p0, n0v), Vertex::new(p1, n1v), Vertex::new(p2, n2v)], metadata.clone()));
+        }
+
+        Mesh::from_polygons(&triangles, metadata)
+    }
 }
