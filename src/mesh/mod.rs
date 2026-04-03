@@ -568,6 +568,33 @@ impl<S: Clone + Send + Sync + Debug> Mesh<S> {
         })
     }
 
+    /// Batch first-hit visibility test for multiple origins along a shared ray direction.
+    ///
+    /// Calls `to_trimesh()` **once** to build the BVH, then dispatches one ray per
+    /// origin.  Returns a `Vec<bool>` where `true` means the ray hit something
+    /// (sample is occluded / hidden) and `false` means no hit (sample is visible).
+    ///
+    /// This is much cheaper than calling `raycast_first` N times from the JS side
+    /// because it avoids N JS→WASM boundary crossings and N BVH re-builds.
+    pub fn raycast_batch_visibility(
+        &self,
+        origins: &[(Real, Real, Real)],
+        direction: &Vector3<Real>,
+        max_dist: Real,
+    ) -> Vec<bool> {
+        let dir = direction.normalize();
+        let Some(trimesh) = self.to_trimesh() else {
+            return vec![false; origins.len()];
+        };
+        origins
+            .iter()
+            .map(|&(ox, oy, oz)| {
+                let ray = Ray::new(Point3::new(ox, oy, oz), dir);
+                trimesh.cast_local_ray(&ray, max_dist, true).is_some()
+            })
+            .collect()
+    }
+
     /// All-hits raycast: returns every triangle intersection along the ray.
     ///
     /// Iterates all triangles of the mesh and returns a `RaycastHit` for each

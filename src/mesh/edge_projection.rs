@@ -117,7 +117,7 @@ impl<S: Clone + Send + Sync + Debug> Mesh<S> {
 
         for (_key, edge) in &edges {
             // Skip degenerate edges (zero-length or near-zero after merging)
-            if (edge.v1 - edge.v0).norm() < 1e-9 {
+            if (edge.v1 - edge.v0).norm() < 1e-6 {
                 continue;
             }
             if !should_keep_edge(&edge.face_normals, &view_dir, feature_thresh) {

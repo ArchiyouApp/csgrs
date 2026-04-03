@@ -8,7 +8,7 @@ use crate::wasm::{
 };
 use crate::io::gltf::{UpAxis};
 use curvo::prelude::Tessellation;
-use js_sys::{Float64Array, Object, Reflect, Uint32Array};
+use js_sys::{Float64Array, Object, Reflect, Uint32Array, Uint8Array};
 use nalgebra::{Matrix4, Point3, Quaternion, UnitQuaternion, Vector3};
 use serde_wasm_bindgen::from_value;
 use wasm_bindgen::prelude::*;
@@ -1050,6 +1050,36 @@ impl MeshJs {
         self.inner.raycast_first(&origin, &direction, max_dist)
             .as_ref()
             .map(RaycastHitJs::from_hit)
+    }
+
+    /// Batch first-hit visibility test.
+    ///
+    /// `origins` — flat `Float64Array` with 3×N floats (x₀,y₀,z₀, x₁,y₁,z₁, …).
+    /// `dx, dy, dz` — shared ray direction (need not be normalised).
+    /// `max_dist` — maximum hit distance.
+    ///
+    /// Returns a `Uint8Array` of length N: `1` = ray hit something (occluded),
+    /// `0` = no hit (visible).
+    ///
+    /// This is the batch companion to `raycastFirst` for the TypeScript HLR pipeline:
+    /// it builds the BVH once and does all raycasts inside Rust, eliminating N
+    /// JS→WASM round-trips.
+    #[wasm_bindgen(js_name = raycastBatchVisibility)]
+    pub fn raycast_batch_visibility_js(
+        &self,
+        origins: &Float64Array,
+        dx: Real, dy: Real, dz: Real,
+        max_dist: Real,
+    ) -> Uint8Array {
+        let raw = origins.to_vec();
+        let n = raw.len() / 3;
+        let direction = Vector3::new(dx, dy, dz);
+        let pts: Vec<(Real, Real, Real)> = (0..n)
+            .map(|i| (raw[i * 3] as Real, raw[i * 3 + 1] as Real, raw[i * 3 + 2] as Real))
+            .collect();
+        let flags = self.inner.raycast_batch_visibility(&pts, &direction, max_dist);
+        let bytes: Vec<u8> = flags.iter().map(|&hit| hit as u8).collect();
+        Uint8Array::from(bytes.as_slice())
     }
 
     /// All-hits raycast: every triangle intersection along the ray, sorted by distance.

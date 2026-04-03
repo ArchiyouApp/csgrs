@@ -17,6 +17,65 @@ use super::vector_js::{ Vector3Js };
 use wasm_bindgen::prelude::*;
 
 
+/// Shared geo-buf / Sketch polygon offset used by NurbsCurve3DJs and CompoundCurve3DJs.
+///
+/// Closes the tessellated point list into a polygon, runs geo-buf's straight-skeleton
+/// offset via [`Sketch::offset`], then extracts all exterior boundaries as a single
+/// degree-1 CompoundCurve3D.
+#[cfg(feature = "offset")]
+fn offset_geo_sketch(pts_3d: &[Point3<Real>], distance: Real) -> Result<CompoundCurve3DJs, JsValue> {
+    use crate::sketch::Sketch;
+    use geo::{Coord, Geometry, GeometryCollection, LineString, Polygon};
+
+    if pts_3d.len() < 3 {
+        return Err(JsValue::from_str("offsetGeo: need at least 3 points to form a polygon"));
+    }
+
+    // Build a closed 2D polygon ring from XY coordinates.
+    let mut coords: Vec<Coord<Real>> = pts_3d.iter().map(|p| Coord { x: p.x, y: p.y }).collect();
+    let first = coords[0];
+    let last = *coords.last().unwrap();
+    if (last.x - first.x).abs() > 1e-9 || (last.y - first.y).abs() > 1e-9 {
+        coords.push(first); // close the ring
+    }
+
+    let polygon = Polygon::new(LineString::new(coords), vec![]);
+    let sketch: Sketch<()> = Sketch::from_geo(
+        GeometryCollection(vec![Geometry::Polygon(polygon)]),
+        None,
+    );
+
+    // Delegate to geo-buf via Sketch::offset (straight-skeleton algorithm).
+    let offset_sketch = sketch.offset(distance);
+    let multi_poly = offset_sketch.to_multipolygon();
+
+    if multi_poly.0.is_empty() {
+        return Err(JsValue::from_str("offsetGeo: offset produced no polygons"));
+    }
+
+    // Collect all exterior rings from the result as individual degree-1 spans.
+    let mut spans: Vec<NurbsCurve3D<Real>> = Vec::new();
+    for poly in &multi_poly.0 {
+        let pts: Vec<Point3<Real>> = poly
+            .exterior()
+            .coords()
+            .map(|c| Point3::new(c.x, c.y, 0.0))
+            .collect();
+        if pts.len() >= 2 {
+            spans.push(NurbsCurve3D::polyline(&pts, false));
+        }
+    }
+
+    if spans.is_empty() {
+        return Err(JsValue::from_str("offsetGeo: no valid spans in offset result"));
+    }
+
+    CompoundCurve3D::try_new(spans)
+        .map(CompoundCurve3DJs::from)
+        .map_err(|e| JsValue::from_str(&format!("offsetGeo: failed to build curve: {:?}", e)))
+}
+
+
 //// Point4Js for weighted control points ////
 
 #[wasm_bindgen]
@@ -445,6 +504,17 @@ impl NurbsCurve3DJs
             .map_err(|e| JsValue::from_str(&format!("Failed to build offset result: {:?}", e)))
     }
     
+
+    /// Offset the curve using the geo-buf / Sketch polygon offset as a fallback.
+    /// Tessellates to a polyline, closes it to form a polygon, offsets via geo-buf's
+    /// straight-skeleton algorithm, then returns the exterior boundary as a degree-1 curve.
+    /// The curve must lie in the XY plane (z ≈ 0).
+    #[cfg(feature = "offset")]
+    #[wasm_bindgen(js_name = offsetGeo)]
+    pub fn offset_geo(&self, distance: Real) -> Result<CompoundCurve3DJs, JsValue> {
+        let pts_3d = self.inner.tessellate(Some(1e-4));
+        offset_geo_sketch(&pts_3d, distance)
+    }
 
     /// Reverse the direction of this curve (swap start/end).
     /// Returns a new reversed copy.
@@ -1144,6 +1214,17 @@ impl CompoundCurve3DJs
         CompoundCurve3D::try_new(all_3d_spans)
             .map(CompoundCurve3DJs::from)
             .map_err(|e| JsValue::from_str(&format!("Failed to build offset result: {:?}", e)))
+    }
+
+    /// Offset the compound curve using the geo-buf / Sketch polygon offset as a fallback.
+    /// Tessellates to a polyline, closes it to form a polygon, offsets via geo-buf's
+    /// straight-skeleton algorithm, then returns the exterior boundary as a degree-1 curve.
+    /// The curve must lie in the XY plane (z ≈ 0).
+    #[cfg(feature = "offset")]
+    #[wasm_bindgen(js_name = offsetGeo)]
+    pub fn offset_geo(&self, distance: Real) -> Result<CompoundCurve3DJs, JsValue> {
+        let pts_3d = self.inner.tessellate(Some(1e-4));
+        offset_geo_sketch(&pts_3d, distance)
     }
 
     /// Merge consecutive collinear degree-1 spans into single polyline spans.
