@@ -60,42 +60,115 @@ impl<S: Clone + Send + Sync + Debug> BMesh<S> {
 
     /// Core helper for boolean ops, handling empty cases and delegating to boolmesh.
     fn boolean(&self, other: &Self, op: OpType) -> Self {
-        
+        self.try_boolean(other, op)
+            .unwrap_or_else(|e| panic!("BMesh boolean operation failed: {e}"))
+    }
+
+    /// Fallible boolean: returns `Err` instead of panicking when boolmesh fails.
+    /// Used by `Mesh<S>` to fall back to the BSP path on error.
+    pub fn try_boolean(&self, other: &Self, op: OpType) -> Result<Self, String> {
+        use std::panic::AssertUnwindSafe;
         use OpType::*;
 
         match (&self.manifold, &other.manifold) {
             // Ø op Ø  => Ø
-            (None, None) => BMesh::new(),
+            (None, None) => Ok(BMesh::new()),
 
             // A op Ø
             (Some(_), None) => match op {
-                Add | Subtract => self.clone(), // A ∪ Ø = A, A − Ø = A
-                Intersect => BMesh::new(),      // A ∩ Ø = Ø
+                Add | Subtract => Ok(self.clone()), // A ∪ Ø = A, A − Ø = A
+                Intersect => Ok(BMesh::new()),      // A ∩ Ø = Ø
             },
 
             // Ø op B
             (None, Some(_)) => match op {
-                Add => other.clone(),           // Ø ∪ B = B
-                Subtract => BMesh::new(),       // Ø − B = Ø
-                Intersect => BMesh::new(),      // Ø ∩ B = Ø
+                Add => Ok(other.clone()),           // Ø ∪ B = B
+                Subtract => Ok(BMesh::new()),       // Ø − B = Ø
+                Intersect => Ok(BMesh::new()),      // Ø ∩ B = Ø
             },
 
             // A op B, both non-empty
             (Some(mp), Some(mq)) => {
-                let m = compute_boolean(mp, mq, op)
-                    .unwrap_or_else(|e| {
-                        // We may want to change this to a different error strategy.
-                        panic!("BMesh boolean operation failed: {e}");
-                    });
+                let mp_ref = mp;
+                let mq_ref = mq;
+                let metadata = self.metadata.clone();
 
-                // Follow `Mesh` semantics: keep left-hand side metadata.
-                BMesh {
-                    manifold: Some(m),
-                    bounding_box: OnceLock::new(),
-                    metadata: self.metadata.clone(),
+                // Wrap compute_boolean in catch_unwind so that any panic inside
+                // boolmesh (e.g. wasm32 FP precision edge cases) is converted to
+                // an Err rather than aborting the whole wasm module.
+                // Requires panic="unwind" + wasm exception-handling on wasm32.
+                let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    compute_boolean(mp_ref, mq_ref, op)
+                }));
+
+                match result {
+                    Ok(Ok(m)) => Ok(BMesh {
+                        manifold: Some(m),
+                        bounding_box: OnceLock::new(),
+                        metadata,
+                    }),
+                    Ok(Err(e)) => Err(e),
+                    Err(_) => Err("boolmesh boolean op panicked (FP precision)".to_string()),
                 }
             }
         }
+    }
+
+    /// Fallible union: returns `Err` on boolmesh failure instead of panicking.
+    pub fn try_union(&self, other: &Self) -> Result<Self, String> {
+        self.try_boolean(other, OpType::Add)
+    }
+
+    /// Fallible difference: returns `Err` on boolmesh failure instead of panicking.
+    pub fn try_difference(&self, other: &Self) -> Result<Self, String> {
+        self.try_boolean(other, OpType::Subtract)
+    }
+
+    /// Fallible intersection: returns `Err` on boolmesh failure instead of panicking.
+    pub fn try_intersection(&self, other: &Self) -> Result<Self, String> {
+        self.try_boolean(other, OpType::Intersect)
+    }
+
+    /// Convert a csgrs Mesh into a boolmesh-backed BMesh.
+    ///
+    /// boolmesh only accepts watertight manifold triangle meshes. Many BSP
+    /// results are geometrically valid but still contain boundary edges or
+    /// other topology issues that boolmesh rejects. This method makes that
+    /// validation explicit so callers can fall back to BSP instead of panicking.
+    pub fn try_from_mesh(mesh: Mesh<S>) -> Result<Self, String> {
+        if !mesh.is_manifold() {
+            return Err("Input mesh is not manifold; skipping boolmesh conversion".into());
+        }
+
+        let metadata = mesh.metadata.clone();
+        let tri_mesh = mesh.triangulate();
+        let (vertices, indices) = tri_mesh.get_vertices_and_indices();
+
+        let mut pos_bool: Vec<boolmesh::Real> = Vec::with_capacity(vertices.len() * 3);
+        for v in &vertices {
+            pos_bool.push(v.x as boolmesh::Real);
+            pos_bool.push(v.y as boolmesh::Real);
+            pos_bool.push(v.z as boolmesh::Real);
+        }
+
+        let mut idx_bool: Vec<usize> = Vec::with_capacity(indices.len() * 3);
+        for tri in &indices {
+            idx_bool.push(tri[0] as usize);
+            idx_bool.push(tri[1] as usize);
+            idx_bool.push(tri[2] as usize);
+        }
+
+        let manifold = if idx_bool.is_empty() {
+            None
+        } else {
+            Some(Manifold::new(&pos_bool, &idx_bool)?)
+        };
+
+        Ok(BMesh {
+            manifold,
+            bounding_box: OnceLock::new(),
+            metadata,
+        })
     }
 
     /// Rebuild a manifold after applying a matrix transform to all vertex positions.
@@ -254,45 +327,7 @@ impl<S: Clone + Send + Sync + Debug> CSG for BMesh<S> {
 
 impl<S: Clone + Send + Sync + Debug> From<Mesh<S>> for BMesh<S> {
     fn from(mesh: Mesh<S>) -> Self {
-        // Keep the metadata from the original mesh
-        let metadata = mesh.metadata.clone();
-
-        // Triangulate the mesh
-        let tri_mesh = mesh.triangulate();
-
-        // Extract vertices and triangle indices from the triangulated mesh
-        let (vertices, indices) = tri_mesh.get_vertices_and_indices();
-
-        // Flatten vertices into boolmesh's `Vec<Real>` layout: [x0, y0, z0, x1, y1, z1, ...]
-        let mut pos_bool: Vec<boolmesh::Real> = Vec::with_capacity(vertices.len() * 3);
-        for v in &vertices {
-            pos_bool.push(v.x as boolmesh::Real);
-            pos_bool.push(v.y as boolmesh::Real);
-            pos_bool.push(v.z as boolmesh::Real);
-        }
-
-        // Flatten triangle indices into `Vec<usize>`
-        let mut idx_bool: Vec<usize> = Vec::with_capacity(indices.len() * 3);
-        for tri in &indices {
-            idx_bool.push(tri[0] as usize);
-            idx_bool.push(tri[1] as usize);
-            idx_bool.push(tri[2] as usize);
-        }
-
-        // If there are no triangles, treat as empty BMesh
-        let manifold = if idx_bool.is_empty() {
-            None
-        } else {
-            Some(
-                Manifold::new(&pos_bool, &idx_bool)
-                    .expect("boolmesh::Manifold::new failed when converting from Mesh"),
-            )
-        };
-
-        BMesh {
-            manifold,
-            bounding_box: OnceLock::new(),
-            metadata,
-        }
+        BMesh::try_from_mesh(mesh)
+            .unwrap_or_else(|e| panic!("boolmesh::Manifold::new failed when converting from Mesh: {e}"))
     }
 }

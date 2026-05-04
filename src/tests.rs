@@ -2695,6 +2695,8 @@ fn debug_edge_projection_subtracted_box() {
             }).collect(),
             bounding_box: std::sync::OnceLock::new(),
             metadata: None,
+            #[cfg(feature = "bmesh")]
+            bool_algorithm: m.bool_algorithm,
         }
     }
 

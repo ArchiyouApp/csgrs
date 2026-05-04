@@ -100,6 +100,8 @@ impl<S: Clone + Debug + Send + Sync> Sketch<S> {
             polygons: out,
             bounding_box: OnceLock::new(),
             metadata: self.metadata.clone(),
+            #[cfg(feature = "bmesh")]
+            bool_algorithm: crate::mesh::BoolAlgorithm::BoolMesh,
         }
     }
 
@@ -857,6 +859,8 @@ impl<S: Clone + Debug + Send + Sync> Sketch<S> {
             polygons: new_polygons,
             bounding_box: OnceLock::new(),
             metadata: self.metadata.clone(),
+            #[cfg(feature = "bmesh")]
+            bool_algorithm: crate::mesh::BoolAlgorithm::BoolMesh,
         })
     }
 
