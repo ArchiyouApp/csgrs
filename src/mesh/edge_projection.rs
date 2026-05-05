@@ -610,6 +610,8 @@ mod tests {
             }).collect(),
             bounding_box: std::sync::OnceLock::new(),
             metadata: m.metadata,
+            #[cfg(feature = "bmesh")]
+            bool_algorithm: m.bool_algorithm,
         }
     }
 

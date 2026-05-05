@@ -30,12 +30,26 @@ use nalgebra::{
 };
 use std::{
     cmp::PartialEq,
+    collections::HashMap,
     fmt::Debug,
     num::NonZeroU32,
     sync::OnceLock,
 };
 #[cfg(feature = "bmesh")]
 use crate::bmesh::BMesh;
+
+/// Selects which boolean algorithm is used by `Mesh` operations (`union`, `difference`, `intersection`, `xor`).
+///
+/// - `Bsp` – the original BSP-tree based algorithm (classic csgrs).
+/// - `BoolMesh` – the `boolmesh` crate's robust manifold algorithm (default).
+#[cfg(feature = "bmesh")]
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum BoolAlgorithm
+{
+    Bsp,
+    #[default]
+    BoolMesh,
+}
 
 #[cfg(feature = "parallel")]
 use rayon::{iter::IntoParallelRefIterator, prelude::*};
@@ -68,7 +82,8 @@ pub mod tpms;
 pub mod triangulated;
 
 #[derive(Clone, Debug)]
-pub struct Mesh<S: Clone + Send + Sync + Debug> {
+pub struct Mesh<S: Clone + Send + Sync + Debug>
+{
     /// 3D polygons for volumetric shapes
     pub polygons: Vec<Polygon<S>>,
 
@@ -77,6 +92,10 @@ pub struct Mesh<S: Clone + Send + Sync + Debug> {
 
     /// Metadata
     pub metadata: Option<S>,
+
+    /// Which boolean kernel to use for `union` / `difference` / `intersection` / `xor`.
+    #[cfg(feature = "bmesh")]
+    pub bool_algorithm: BoolAlgorithm,
 }
 
 impl<S: Clone + Send + Sync + Debug + PartialEq> Mesh<S> {
@@ -100,11 +119,34 @@ impl<S: Clone + Send + Sync + Debug + PartialEq> Mesh<S> {
             polygons: polys,
             bounding_box: std::sync::OnceLock::new(),
             metadata: self.metadata.clone(),
+            #[cfg(feature = "bmesh")]
+            bool_algorithm: self.bool_algorithm.clone(),
         }
     }
 }
 
-impl<S: Clone + Send + Sync + Debug> Mesh<S> {
+impl<S: Clone + Send + Sync + Debug> Mesh<S>
+{
+    /// Set the boolean algorithm to `boolmesh` for this mesh (builder-style).
+    ///
+    /// Subsequent `union`, `difference`, `intersection`, and `xor` calls on the
+    /// returned mesh will use boolmesh's robust manifold kernel instead of the
+    /// classic BSP algorithm.
+    #[cfg(feature = "bmesh")]
+    pub fn with_boolmesh(mut self) -> Self
+    {
+        self.bool_algorithm = BoolAlgorithm::BoolMesh;
+        self
+    }
+
+    /// Set the boolean algorithm to the classic BSP tree for this mesh (builder-style).
+    #[cfg(feature = "bmesh")]
+    pub fn with_bsp(mut self) -> Self
+    {
+        self.bool_algorithm = BoolAlgorithm::Bsp;
+        self
+    }
+
     /// Build a Mesh from an existing polygon list
     pub fn from_polygons(polygons: &[Polygon<S>], metadata: Option<S>) -> Self {
         let mut mesh = Mesh::new();
@@ -260,18 +302,38 @@ impl<S: Clone + Send + Sync + Debug> Mesh<S> {
     /// Extracts vertices and indices from the Mesh's tessellated polygons.
     pub fn get_vertices_and_indices(&self) -> (Vec<Point3<Real>>, Vec<[u32; 3]>) {
         let tri_csg = self.triangulate();
-        let vertices = tri_csg
-            .polygons
-            .iter()
-            .flat_map(|p| [p.vertices[0].position, p.vertices[1].position, p.vertices[2].position])
-            .collect();
 
-        let indices = (0..tri_csg.polygons.len())
-            .map(|i| {
-                let offset = i as u32 * 3;
-                [offset, offset + 1, offset + 2]
-            })
-            .collect();
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        struct QuantizedPoint(i64, i64, i64);
+
+        fn quantize_point(point: &Point3<Real>, weld_tolerance: Real) -> QuantizedPoint {
+            QuantizedPoint(
+                (point.x / weld_tolerance).round() as i64,
+                (point.y / weld_tolerance).round() as i64,
+                (point.z / weld_tolerance).round() as i64,
+            )
+        }
+
+        let weld_tolerance = (tolerance() * 0.01).max(Real::EPSILON * 1024.0);
+        let mut vertex_map = HashMap::new();
+        let mut vertices = Vec::new();
+        let mut indices = Vec::with_capacity(tri_csg.polygons.len());
+
+        for polygon in &tri_csg.polygons {
+            let mut triangle = [0_u32; 3];
+
+            for (slot, vertex) in polygon.vertices.iter().take(3).enumerate() {
+                let key = quantize_point(&vertex.position, weld_tolerance);
+                let index = *vertex_map.entry(key).or_insert_with(|| {
+                    let next_index = vertices.len() as u32;
+                    vertices.push(vertex.position);
+                    next_index
+                });
+                triangle[slot] = index;
+            }
+
+            indices.push(triangle);
+        }
 
         (vertices, indices)
     }
@@ -756,13 +818,17 @@ impl<S: Clone + Send + Sync + Debug> Mesh<S> {
     }
 }
 
-impl<S: Clone + Send + Sync + Debug> CSG for Mesh<S> {
+impl<S: Clone + Send + Sync + Debug> CSG for Mesh<S>
+{
     /// Returns a new empty Mesh
-    fn new() -> Self {
+    fn new() -> Self
+    {
         Mesh {
             polygons: Vec::new(),
             bounding_box: OnceLock::new(),
             metadata: None,
+            #[cfg(feature = "bmesh")]
+            bool_algorithm: BoolAlgorithm::BoolMesh,
         }
     }
 
@@ -779,7 +845,27 @@ impl<S: Clone + Send + Sync + Debug> CSG for Mesh<S> {
     ///          |       |            |       |
     ///          +-------+            +-------+
     /// ```
-    fn union(&self, other: &Mesh<S>) -> Mesh<S> {
+    fn union(&self, other: &Mesh<S>) -> Mesh<S>
+    {
+        // ── boolmesh fast-path ──────────────────────────────────────────────────
+        #[cfg(feature = "bmesh")]
+        if self.bool_algorithm == BoolAlgorithm::BoolMesh
+        {
+            if self.is_manifold() && other.is_manifold() {
+                if let (Ok(bm_self), Ok(bm_other)) = (
+                    BMesh::try_from_mesh(self.clone()),
+                    BMesh::try_from_mesh(other.clone()),
+                ) {
+                    if let Ok(res_bm) = bm_self.try_union(&bm_other)
+                    {
+                        let mut res  = Mesh::from(res_bm);
+                        res.bool_algorithm = BoolAlgorithm::BoolMesh;
+                        return res;
+                    }
+                }
+            }
+        }
+        // ── BSP path ────────────────────────────────────────────────────────────
         // avoid splitting obvious non‑intersecting faces
         #[cfg(feature = "mesh-bbopt")]
         let final_polys = {
@@ -824,6 +910,8 @@ impl<S: Clone + Send + Sync + Debug> CSG for Mesh<S> {
             polygons: final_polys,
             bounding_box: OnceLock::new(),
             metadata: self.metadata.clone(),
+            #[cfg(feature = "bmesh")]
+            bool_algorithm: self.bool_algorithm.clone(),
         }
     }
 
@@ -840,7 +928,27 @@ impl<S: Clone + Send + Sync + Debug> CSG for Mesh<S> {
     ///          |       |
     ///          +-------+
     /// ```
-    fn difference(&self, other: &Mesh<S>) -> Mesh<S> {
+    fn difference(&self, other: &Mesh<S>) -> Mesh<S>
+    {
+        // ── boolmesh fast-path ──────────────────────────────────────────────────
+        #[cfg(feature = "bmesh")]
+        if self.bool_algorithm == BoolAlgorithm::BoolMesh
+        {
+            if self.is_manifold() && other.is_manifold() {
+                if let (Ok(bm_self), Ok(bm_other)) = (
+                    BMesh::try_from_mesh(self.clone()),
+                    BMesh::try_from_mesh(other.clone()),
+                ) {
+                    if let Ok(res_bm) = bm_self.try_difference(&bm_other)
+                    {
+                        let mut res  = Mesh::from(res_bm);
+                        res.bool_algorithm = BoolAlgorithm::BoolMesh;
+                        return res;
+                    }
+                }
+            }
+        }
+        // ── BSP path ────────────────────────────────────────────────────────────
         // avoid splitting obvious non‑intersecting faces
         #[cfg(feature = "mesh-bbopt")]
         let final_polys = {
@@ -899,6 +1007,8 @@ impl<S: Clone + Send + Sync + Debug> CSG for Mesh<S> {
             polygons: final_polys,
             bounding_box: OnceLock::new(),
             metadata: self.metadata.clone(),
+            #[cfg(feature = "bmesh")]
+            bool_algorithm: self.bool_algorithm.clone(),
         }
     }
 
@@ -915,7 +1025,27 @@ impl<S: Clone + Send + Sync + Debug> CSG for Mesh<S> {
     ///          |       |
     ///          +-------+
     /// ```
-    fn intersection(&self, other: &Mesh<S>) -> Mesh<S> {
+    fn intersection(&self, other: &Mesh<S>) -> Mesh<S>
+    {
+        // ── boolmesh fast-path ──────────────────────────────────────────────────
+        #[cfg(feature = "bmesh")]
+        if self.bool_algorithm == BoolAlgorithm::BoolMesh
+        {
+            if self.is_manifold() && other.is_manifold() {
+                if let (Ok(bm_self), Ok(bm_other)) = (
+                    BMesh::try_from_mesh(self.clone()),
+                    BMesh::try_from_mesh(other.clone()),
+                ) {
+                    if let Ok(res_bm) = bm_self.try_intersection(&bm_other)
+                    {
+                        let mut res  = Mesh::from(res_bm);
+                        res.bool_algorithm = BoolAlgorithm::BoolMesh;
+                        return res;
+                    }
+                }
+            }
+        }
+        // ── BSP path ────────────────────────────────────────────────────────────
         let mut a = Node::from_polygons(&self.polygons);
         let mut b = Node::from_polygons(&other.polygons);
 
@@ -931,6 +1061,8 @@ impl<S: Clone + Send + Sync + Debug> CSG for Mesh<S> {
             polygons: a.all_polygons(),
             bounding_box: OnceLock::new(),
             metadata: self.metadata.clone(),
+            #[cfg(feature = "bmesh")]
+            bool_algorithm: self.bool_algorithm.clone(),
         }
     }
 
@@ -1145,6 +1277,8 @@ impl<S: Clone + Send + Sync + Debug> From<Sketch<S>> for Mesh<S> {
             polygons: final_polygons,
             bounding_box: OnceLock::new(),
             metadata: None,
+            #[cfg(feature = "bmesh")]
+            bool_algorithm: BoolAlgorithm::BoolMesh,
         }
     }
 }
@@ -1196,5 +1330,67 @@ impl<S: Clone + Send + Sync + Debug> From<BMesh<S>> for Mesh<S> {
         }
 
         Mesh::from_polygons(&polygons, bmesh.metadata.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Mesh;
+    use crate::polygon::Polygon;
+    use crate::vertex::Vertex;
+    use nalgebra::{Point3, Vector3};
+
+    fn near_equal_tetra_mesh() -> Mesh<()> {
+        let base: Polygon<()> = Polygon::new(
+            vec![
+                Vertex::new(Point3::new(0.0, 0.0, 0.0), Vector3::z()),
+                Vertex::new(Point3::new(0.0, 1.0, 0.0), Vector3::z()),
+                Vertex::new(Point3::new(1.0, 0.0, 0.0), Vector3::z()),
+            ],
+            None,
+        );
+        let side_y: Polygon<()> = Polygon::new(
+            vec![
+                Vertex::new(Point3::new(1e-10, 0.0, 0.0), Vector3::z()),
+                Vertex::new(Point3::new(1.0, 0.0, 0.0), Vector3::z()),
+                Vertex::new(Point3::new(0.0, 0.0, 1.0 + 1e-10), Vector3::z()),
+            ],
+            None,
+        );
+        let side_x: Polygon<()> = Polygon::new(
+            vec![
+                Vertex::new(Point3::new(0.0, 0.0, 0.0), Vector3::z()),
+                Vertex::new(Point3::new(0.0, 0.0, 1.0), Vector3::z()),
+                Vertex::new(Point3::new(1e-10, 1.0, 0.0), Vector3::z()),
+            ],
+            None,
+        );
+        let top: Polygon<()> = Polygon::new(
+            vec![
+                Vertex::new(Point3::new(1.0, 0.0, 0.0), Vector3::z()),
+                Vertex::new(Point3::new(0.0, 1.0, 0.0), Vector3::z()),
+                Vertex::new(Point3::new(0.0, 0.0, 1.0), Vector3::z()),
+            ],
+            None,
+        );
+
+        Mesh::from_polygons(&[base, side_y, side_x, top], None)
+    }
+
+    #[test]
+    fn get_vertices_and_indices_welds_near_equal_vertices() {
+        let mesh = near_equal_tetra_mesh();
+        let (vertices, indices) = mesh.get_vertices_and_indices();
+
+        assert_eq!(vertices.len(), 4);
+        assert_eq!(indices.len(), 4);
+    }
+
+    #[cfg(feature = "bmesh")]
+    #[test]
+    fn bmesh_conversion_accepts_welded_near_equal_vertices() {
+        let mesh = near_equal_tetra_mesh();
+
+        assert!(crate::bmesh::BMesh::<()>::try_from_mesh(mesh).is_ok());
     }
 }
