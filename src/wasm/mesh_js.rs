@@ -419,6 +419,37 @@ impl MeshJs {
         SketchJs { inner: sketch }
     }
 
+    /// Split this mesh by a plane into two halves.
+    ///
+    /// Returns `[front_mesh, back_mesh]` where:
+    /// - `front_mesh` contains polygons on the side the plane normal points toward.
+    /// - `back_mesh` contains polygons on the opposite side.
+    ///
+    /// Polygons spanning the plane are split at the intersection using
+    /// Sutherland-Hodgman clipping.  Coplanar polygons go to `front_mesh`.
+    /// Either half may be empty (zero polygons) if the mesh lies entirely on
+    /// one side of the plane.
+    #[wasm_bindgen(js_name = splitByPlane)]
+    pub fn split_by_plane(&self, plane: &PlaneJs) -> Vec<MeshJs> {
+        let p: Plane = plane.into();
+
+        let mut front_polys = Vec::new();
+        let mut back_polys = Vec::new();
+
+        for poly in &self.inner.polygons {
+            let (cf, cb, mut f, mut b) = p.split_polygon(poly);
+            front_polys.extend(cf);
+            back_polys.extend(cb);
+            front_polys.append(&mut f);
+            back_polys.append(&mut b);
+        }
+
+        vec![
+            MeshJs { inner: Mesh::from_polygons(&front_polys, self.inner.metadata.clone()) },
+            MeshJs { inner: Mesh::from_polygons(&back_polys, self.inner.metadata.clone()) },
+        ]
+    }
+
     #[wasm_bindgen(js_name=laplacianSmooth)]
     pub fn laplacian_smooth(
         &self,
