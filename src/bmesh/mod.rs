@@ -20,6 +20,7 @@ use std::{fmt::Debug, sync::OnceLock};
 #[cfg(feature = "mesh")]
 use crate::mesh::Mesh;
 
+pub mod reconstruct;
 pub mod triangulated;
 
 /// A solid represented by boolmesh’s `Manifold`, wired into csgrs’ `CSG` trait.
@@ -96,6 +97,21 @@ impl<S: Clone + Send + Sync + Debug> BMesh<S> {
                 }
             }
         }
+    }
+
+    /// Convert to a `Mesh<S>` with coplanar triangle merging (polygon reconstruction).
+    ///
+    /// Uses the `coplanar` grouping already computed by boolmesh to merge adjacent
+    /// coplanar triangles back into N-gon polygons.  Prefer this over `Mesh::from(bmesh)`
+    /// when you want polygon structure rather than a raw triangle soup.
+    #[cfg(feature = "mesh")]
+    pub fn to_mesh_reconstructed(&self) -> Mesh<S>
+    {
+        let Some(m) = &self.manifold else {
+            return Mesh::new();
+        };
+        let polygons = reconstruct::reconstruct_polygons(m, &self.metadata);
+        Mesh::from_polygons(&polygons, self.metadata.clone())
     }
 
     /// Rebuild a manifold after applying a matrix transform to all vertex positions.
