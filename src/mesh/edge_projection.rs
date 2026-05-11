@@ -609,6 +609,7 @@ mod tests {
                 crate::polygon::Polygon::new(verts, p.metadata.clone())
             }).collect(),
             bounding_box: std::sync::OnceLock::new(),
+            query_trimesh: std::sync::OnceLock::new(),
             metadata: m.metadata,
             #[cfg(feature = "bmesh")]
             bool_algorithm: m.bool_algorithm,

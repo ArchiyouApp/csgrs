@@ -99,6 +99,7 @@ impl<S: Clone + Debug + Send + Sync> Sketch<S> {
         Mesh {
             polygons: out,
             bounding_box: OnceLock::new(),
+            query_trimesh: OnceLock::new(),
             metadata: self.metadata.clone(),
             #[cfg(feature = "bmesh")]
             bool_algorithm: crate::mesh::BoolAlgorithm::BoolMesh,
@@ -858,6 +859,7 @@ impl<S: Clone + Debug + Send + Sync> Sketch<S> {
         Ok(Mesh {
             polygons: new_polygons,
             bounding_box: OnceLock::new(),
+            query_trimesh: OnceLock::new(),
             metadata: self.metadata.clone(),
             #[cfg(feature = "bmesh")]
             bool_algorithm: crate::mesh::BoolAlgorithm::BoolMesh,

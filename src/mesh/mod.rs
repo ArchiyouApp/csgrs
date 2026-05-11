@@ -90,6 +90,9 @@ pub struct Mesh<S: Clone + Send + Sync + Debug>
     /// Lazily calculated AABB that spans `polygons`.
     pub bounding_box: OnceLock<Aabb>,
 
+    /// Lazily built Parry TriMesh reused by BVH-style query operations.
+    pub query_trimesh: OnceLock<Option<TriMesh>>,
+
     /// Metadata
     pub metadata: Option<S>,
 
@@ -118,6 +121,7 @@ impl<S: Clone + Send + Sync + Debug + PartialEq> Mesh<S> {
         Mesh {
             polygons: polys,
             bounding_box: std::sync::OnceLock::new(),
+            query_trimesh: std::sync::OnceLock::new(),
             metadata: self.metadata.clone(),
             #[cfg(feature = "bmesh")]
             bool_algorithm: self.bool_algorithm.clone(),
@@ -276,6 +280,8 @@ impl<S: Clone + Send + Sync + Debug> Mesh<S>
                 })
                 .collect();
         }
+
+            self.invalidate_bounding_box();
     }
 
     /// Renormalize all polygons in this Mesh by re-computing each polygon’s plane
@@ -479,6 +485,15 @@ impl<S: Clone + Send + Sync + Debug> Mesh<S>
     pub fn to_trimesh(&self) -> Option<TriMesh> {
         let (vertices, indices) = self.get_vertices_and_indices();
         TriMesh::new(vertices, indices).ok()
+    }
+
+    fn cached_trimesh(&self) -> Option<&TriMesh> {
+        self.query_trimesh
+            .get_or_init(|| {
+                let (vertices, indices) = self.get_vertices_and_indices();
+                TriMesh::new(vertices, indices).ok()
+            })
+            .as_ref()
     }
 
     /// Uses Parry to check if a point is inside a `Mesh`'s as a `TriMesh`.\
@@ -703,7 +718,7 @@ impl<S: Clone + Send + Sync + Debug> Mesh<S> {
     /// Uses Parry's `PointQuery` (BVH-accelerated) for the closest surface
     /// point, then derives the outward normal from the signed displacement.
     pub fn closest_point(&self, query: &Point3<Real>) -> Option<bvh::ClosestPointResult> {
-        let trimesh = self.to_trimesh()?;
+        let trimesh = self.cached_trimesh()?;
         let proj = trimesh.project_local_point(query, true /* solid */);
         let diff = *query - proj.point;
         let dist = diff.norm();
@@ -742,11 +757,11 @@ impl<S: Clone + Send + Sync + Debug> Mesh<S> {
     /// Uses Parry's BVH-accelerated TriMesh–TriMesh intersection test.
     /// Returns `false` if either mesh can't be tessellated.
     pub fn hits(&self, other: &Mesh<S>) -> bool {
-        match (self.to_trimesh(), other.to_trimesh()) {
+        match (self.cached_trimesh(), other.cached_trimesh()) {
             (Some(t1), Some(t2)) => {
                 let iso = Isometry3::identity();
                 crate::float_types::parry3d::query::intersection_test(
-                    &iso, &t1, &iso, &t2,
+                    &iso, t1, &iso, t2,
                 )
                 .unwrap_or(false)
             }
@@ -754,15 +769,31 @@ impl<S: Clone + Send + Sync + Debug> Mesh<S> {
         }
     }
 
-    /// Minimum separating distance between this mesh and another.
+    /// Minimum separating distance between this mesh and another using the legacy uncached path.
     ///
     /// Returns `0.0` if they intersect, `Real::MAX` on error.
-    pub fn distance_to_mesh(&self, other: &Mesh<S>) -> Real {
+    pub fn distance_to_mesh_legacy(&self, other: &Mesh<S>) -> Real {
         match (self.to_trimesh(), other.to_trimesh()) {
             (Some(t1), Some(t2)) => {
                 let iso = Isometry3::identity();
                 crate::float_types::parry3d::query::distance(
                     &iso, &t1, &iso, &t2,
+                )
+                .unwrap_or(Real::MAX)
+            }
+            _ => Real::MAX,
+        }
+    }
+
+    /// Minimum separating distance between this mesh and another.
+    ///
+    /// Returns `0.0` if they intersect, `Real::MAX` on error.
+    pub fn distance_to_mesh(&self, other: &Mesh<S>) -> Real {
+        match (self.cached_trimesh(), other.cached_trimesh()) {
+            (Some(t1), Some(t2)) => {
+                let iso = Isometry3::identity();
+                crate::float_types::parry3d::query::distance(
+                    &iso, t1, &iso, t2,
                 )
                 .unwrap_or(Real::MAX)
             }
@@ -826,6 +857,7 @@ impl<S: Clone + Send + Sync + Debug> CSG for Mesh<S>
         Mesh {
             polygons: Vec::new(),
             bounding_box: OnceLock::new(),
+            query_trimesh: OnceLock::new(),
             metadata: None,
             #[cfg(feature = "bmesh")]
             bool_algorithm: BoolAlgorithm::BoolMesh,
@@ -909,6 +941,7 @@ impl<S: Clone + Send + Sync + Debug> CSG for Mesh<S>
         Mesh {
             polygons: final_polys,
             bounding_box: OnceLock::new(),
+            query_trimesh: OnceLock::new(),
             metadata: self.metadata.clone(),
             #[cfg(feature = "bmesh")]
             bool_algorithm: self.bool_algorithm.clone(),
@@ -1006,6 +1039,7 @@ impl<S: Clone + Send + Sync + Debug> CSG for Mesh<S>
         Mesh {
             polygons: final_polys,
             bounding_box: OnceLock::new(),
+            query_trimesh: OnceLock::new(),
             metadata: self.metadata.clone(),
             #[cfg(feature = "bmesh")]
             bool_algorithm: self.bool_algorithm.clone(),
@@ -1060,6 +1094,7 @@ impl<S: Clone + Send + Sync + Debug> CSG for Mesh<S>
         Mesh {
             polygons: a.all_polygons(),
             bounding_box: OnceLock::new(),
+            query_trimesh: OnceLock::new(),
             metadata: self.metadata.clone(),
             #[cfg(feature = "bmesh")]
             bool_algorithm: self.bool_algorithm.clone(),
@@ -1166,6 +1201,7 @@ impl<S: Clone + Send + Sync + Debug> CSG for Mesh<S>
 
         // invalidate the old cached bounding box
         mesh.bounding_box = OnceLock::new();
+        mesh.query_trimesh = OnceLock::new();
 
         mesh
     }
@@ -1209,6 +1245,7 @@ impl<S: Clone + Send + Sync + Debug> CSG for Mesh<S>
     /// Invalidates object's cached bounding box.
     fn invalidate_bounding_box(&mut self) {
         self.bounding_box = OnceLock::new();
+        self.query_trimesh = OnceLock::new();
     }
 
     /// Invert this Mesh (flip inside vs. outside)
@@ -1276,6 +1313,7 @@ impl<S: Clone + Send + Sync + Debug> From<Sketch<S>> for Mesh<S> {
         Mesh {
             polygons: final_polygons,
             bounding_box: OnceLock::new(),
+            query_trimesh: OnceLock::new(),
             metadata: None,
             #[cfg(feature = "bmesh")]
             bool_algorithm: BoolAlgorithm::BoolMesh,

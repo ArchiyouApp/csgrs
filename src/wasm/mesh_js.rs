@@ -1175,6 +1175,11 @@ impl MeshJs {
         self.inner.distance_to_mesh(&other.inner)
     }
 
+    #[wasm_bindgen(js_name = distanceToLegacy)]
+    pub fn distance_to_legacy_js(&self, other: &MeshJs) -> Real {
+        self.inner.distance_to_mesh_legacy(&other.inner)
+    }
+
     /// Orthographically project every vertex of this mesh onto a plane.
     ///
     /// `(ox, oy, oz)` is a point on the plane; `(nx, ny, nz)` is its normal.
