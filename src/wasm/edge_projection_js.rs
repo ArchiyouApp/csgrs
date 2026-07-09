@@ -29,6 +29,13 @@ impl EdgeProjectionResultJs {
     pub fn hidden_polylines(&self) -> JsValue {
         polylines_to_js(&self.inner.hidden_polylines)
     }
+
+    /// Indices into `visiblePolylines()` whose source edge is a silhouette or
+    /// open-mesh boundary — i.e. the outer contour of the projection.
+    #[wasm_bindgen(js_name = silhouetteIndices)]
+    pub fn silhouette_indices(&self) -> js_sys::Uint32Array {
+        js_sys::Uint32Array::from(self.inner.silhouette_indices.as_slice())
+    }
 }
 
 // ─── SectionElevationResultJs ─────────────────────────────────────────────────
@@ -52,6 +59,12 @@ impl SectionElevationResultJs {
     #[wasm_bindgen(js_name = hiddenPolylines)]
     pub fn get_hidden_polylines(&self) -> JsValue {
         polylines_to_js(&self.visible_polylines.hidden_polylines)
+    }
+
+    /// Indices into `visiblePolylines()` forming the outer silhouette contour.
+    #[wasm_bindgen(js_name = silhouetteIndices)]
+    pub fn silhouette_indices(&self) -> js_sys::Uint32Array {
+        js_sys::Uint32Array::from(self.visible_polylines.silhouette_indices.as_slice())
     }
 
     #[wasm_bindgen(js_name = cutSketch)]

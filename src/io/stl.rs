@@ -114,3 +114,51 @@ impl<S: Clone + Debug + Send + Sync> crate::bmesh::BMesh<S> {
         self::to_stl_binary(self, name)
     }
 }
+
+impl<S: Clone + Debug + Send + Sync> crate::mesh::Mesh<S> {
+    /// Import a Mesh from **binary or ASCII** STL data.
+    ///
+    /// `stl_io::read_stl` auto-detects the encoding. Each STL facet becomes a
+    /// triangular `Polygon`; the facet normal is attached to all three
+    /// vertices. `metadata` (if any) is attached to every polygon.
+    pub fn from_stl(stl_data: &[u8], metadata: Option<S>) -> std::io::Result<crate::mesh::Mesh<S>> {
+        use crate::float_types::Real;
+        use crate::polygon::Polygon;
+        use crate::vertex::Vertex;
+        use nalgebra::{Point3, Vector3};
+
+        let mut cursor = Cursor::new(stl_data);
+        let stl = stl_io::read_stl(&mut cursor).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("STL parse error: {e:?}"),
+            )
+        })?;
+
+        let polygons: Vec<Polygon<S>> = stl
+            .faces
+            .iter()
+            .map(|face| {
+                let n = Vector3::new(
+                    face.normal[0] as Real,
+                    face.normal[1] as Real,
+                    face.normal[2] as Real,
+                );
+                let verts: Vec<Vertex> = face
+                    .vertices
+                    .iter()
+                    .map(|&vi| {
+                        let v = &stl.vertices[vi];
+                        Vertex::new(
+                            Point3::new(v[0] as Real, v[1] as Real, v[2] as Real),
+                            n,
+                        )
+                    })
+                    .collect();
+                Polygon::new(verts, metadata.clone())
+            })
+            .collect();
+
+        Ok(crate::mesh::Mesh::from_polygons(&polygons, metadata))
+    }
+}

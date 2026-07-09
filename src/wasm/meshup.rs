@@ -766,21 +766,20 @@ impl NurbsCurve3DJs
         ensure_closed_nurbs_2d(&mut self_2d, 1e-8);
         ensure_closed_nurbs_2d(&mut other_2d, 1e-8);
 
-        let clip = match self_2d.boolean(op, &other_2d, Some(default_solver_options())) {
-            Ok(c) => c,
-            Err(e) => {
-                let err_msg = format!("{:?}", e);
-                if err_msg.contains("odd number of intersections") {
-                    let perturbed = perturb_nurbs_2d(&other_2d, 1e-5);
-                    self_2d.boolean(op, &perturbed, Some(default_solver_options()))
-                        .map_err(|e2| JsValue::from_str(&format!("booleanCurve({}) failed after retry: {:?}", operation, e2)))?
-                } else {
-                    return Err(JsValue::from_str(&format!("booleanCurve({}) failed: {}", operation, err_msg)));
-                }
-            }
-        };
-
-        clip_regions_to_3d(clip, &origin, &local_x, &local_y)
+        robust_boolean_regions(
+            |jit| self_2d
+                .boolean(op, &perturb_nurbs_2d(&other_2d, jit), Some(default_solver_options()))
+                .map_err(|e| format!("{:?}", e)),
+            || geo_boolean_fallback(
+                &nurbs2d_ring(&self_2d, GEO_TESS_TOL),
+                &nurbs2d_ring(&other_2d, GEO_TESS_TOL),
+                op, &origin, &local_x, &local_y,
+            ),
+            &origin,
+            &local_x,
+            &local_y,
+            "Curve",
+        )
     }
 
     /// Perform a boolean operation (union / intersection / difference) with a CompoundCurve3D.
@@ -805,22 +804,23 @@ impl NurbsCurve3DJs
         let self_compound_2d = CompoundCurve2D::try_new(vec![self_2d])
             .map_err(|e| JsValue::from_str(&format!("Failed to wrap curve as compound: {:?}", e)))?;
 
-        let clip = match self_compound_2d.boolean(op, &other_2d, Some(default_solver_options())) {
-            Ok(c) => c,
-            Err(e) => {
-                let err_msg = format!("{:?}", e);
-                if err_msg.contains("odd number of intersections") {
-                    let perturbed = perturb_compound_2d(&other_2d, 1e-5)
-                        .map_err(|e2| JsValue::from_str(&e2))?;
-                    self_compound_2d.boolean(op, &perturbed, Some(default_solver_options()))
-                        .map_err(|e2| JsValue::from_str(&format!("booleanCompoundCurve({}) failed after retry: {:?}", operation, e2)))?
-                } else {
-                    return Err(JsValue::from_str(&format!("booleanCompoundCurve({}) failed: {}", operation, err_msg)));
-                }
-            }
-        };
-
-        clip_regions_to_3d(clip, &origin, &local_x, &local_y)
+        robust_boolean_regions(
+            |jit| {
+                let cand = perturb_compound_2d(&other_2d, jit)?;
+                self_compound_2d
+                    .boolean(op, &cand, Some(default_solver_options()))
+                    .map_err(|e| format!("{:?}", e))
+            },
+            || geo_boolean_fallback(
+                &compound2d_ring(&self_compound_2d, GEO_TESS_TOL),
+                &compound2d_ring(&other_2d, GEO_TESS_TOL),
+                op, &origin, &local_x, &local_y,
+            ),
+            &origin,
+            &local_x,
+            &local_y,
+            "CompoundCurve",
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -1548,21 +1548,20 @@ impl CompoundCurve3DJs
             .map_err(|e| JsValue::from_str(&e))?;
         ensure_closed_nurbs_2d(&mut other_2d, 1e-8);
 
-        let clip = match self_2d.boolean(op, &other_2d, Some(default_solver_options())) {
-            Ok(c) => c,
-            Err(e) => {
-                let err_msg = format!("{:?}", e);
-                if err_msg.contains("odd number of intersections") {
-                    let perturbed = perturb_nurbs_2d(&other_2d, 1e-5);
-                    self_2d.boolean(op, &perturbed, Some(default_solver_options()))
-                        .map_err(|e2| JsValue::from_str(&format!("booleanCurve({}) failed after retry: {:?}", operation, e2)))?
-                } else {
-                    return Err(JsValue::from_str(&format!("booleanCurve({}) failed: {}", operation, err_msg)));
-                }
-            }
-        };
-
-        clip_regions_to_3d(clip, &origin, &local_x, &local_y)
+        robust_boolean_regions(
+            |jit| self_2d
+                .boolean(op, &perturb_nurbs_2d(&other_2d, jit), Some(default_solver_options()))
+                .map_err(|e| format!("{:?}", e)),
+            || geo_boolean_fallback(
+                &compound2d_ring(&self_2d, GEO_TESS_TOL),
+                &nurbs2d_ring(&other_2d, GEO_TESS_TOL),
+                op, &origin, &local_x, &local_y,
+            ),
+            &origin,
+            &local_x,
+            &local_y,
+            "Curve",
+        )
     }
 
     /// Perform a boolean operation (union / intersection / difference) with another CompoundCurve3D.
@@ -1584,22 +1583,23 @@ impl CompoundCurve3DJs
         let other_2d = ensure_closed_compound_2d(other_2d, 1e-8)
             .map_err(|e| JsValue::from_str(&e))?;
 
-        let clip = match self_2d.boolean(op, &other_2d, Some(default_solver_options())) {
-            Ok(c) => c,
-            Err(e) => {
-                let err_msg = format!("{:?}", e);
-                if err_msg.contains("odd number of intersections") {
-                    let perturbed = perturb_compound_2d(&other_2d, 1e-5)
-                        .map_err(|e2| JsValue::from_str(&e2))?;
-                    self_2d.boolean(op, &perturbed, Some(default_solver_options()))
-                        .map_err(|e2| JsValue::from_str(&format!("booleanCompoundCurve({}) failed after retry: {:?}", operation, e2)))?
-                } else {
-                    return Err(JsValue::from_str(&format!("booleanCompoundCurve({}) failed: {}", operation, err_msg)));
-                }
-            }
-        };
-
-        clip_regions_to_3d(clip, &origin, &local_x, &local_y)
+        robust_boolean_regions(
+            |jit| {
+                let cand = perturb_compound_2d(&other_2d, jit)?;
+                self_2d
+                    .boolean(op, &cand, Some(default_solver_options()))
+                    .map_err(|e| format!("{:?}", e))
+            },
+            || geo_boolean_fallback(
+                &compound2d_ring(&self_2d, GEO_TESS_TOL),
+                &compound2d_ring(&other_2d, GEO_TESS_TOL),
+                op, &origin, &local_x, &local_y,
+            ),
+            &origin,
+            &local_x,
+            &local_y,
+            "CompoundCurve",
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -1969,6 +1969,181 @@ fn ensure_closed_compound_2d(compound: CompoundCurve2D<Real>, tol: Real) -> Resu
     }
     CompoundCurve2D::try_new(spans)
         .map_err(|e| format!("Failed to close compound curve: {:?}", e))
+}
+
+/// 2-D tessellation resolution for the geo fallback (world units).
+const GEO_TESS_TOL: Real = 1e-2;
+
+/// Run a 2-D curve boolean with **escalating jitter** and a **deterministic geo
+/// fallback**, keeping the cleanest result (fewest exterior regions).
+///
+/// curvo's 2-D boolean is numerically unstable on exact-tangency / degenerate
+/// inputs: it "succeeds" but fragments the result into many sliver regions and
+/// is non-deterministic across repeats. We first retry with an increasing
+/// perturbation and keep the fewest-region attempt. If the best is still
+/// fragmented (> 1 region) we fall back to a geo polygon boolean, which is
+/// deterministic and merges the slivers — at the cost of a polyline (not
+/// smooth-arc) approximation. The fallback only wins when it yields *fewer*
+/// regions, so clean and genuinely multi-region curvo results keep their
+/// smooth curves.
+fn robust_boolean_regions<F, G>(
+    try_boolean: F,
+    geo_fallback: G,
+    origin: &Point3<Real>,
+    local_x: &Vector3<Real>,
+    local_y: &Vector3<Real>,
+    op_label: &str,
+) -> Result<Vec<BooleanRegionJs>, JsValue>
+where
+    F: Fn(Real) -> Result<Clip<Real>, String>,
+    G: Fn() -> Result<Vec<BooleanRegionJs>, String>,
+{
+    const JITTERS: [Real; 9] = [0.0, 1e-6, 1e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 3e-2];
+    let mut best: Option<Vec<BooleanRegionJs>> = None;
+    let mut best_n = usize::MAX;
+    let mut last_err = String::from("no result");
+
+    for &j in JITTERS.iter() {
+        match try_boolean(j) {
+            Ok(clip) => match clip_regions_to_3d(clip, origin, local_x, local_y) {
+                Ok(regions) => {
+                    let n = regions.len();
+                    if n > 0 && n < best_n {
+                        best_n = n;
+                        best = Some(regions);
+                        if best_n == 1 {
+                            break; // a single region is already ideal
+                        }
+                    }
+                }
+                Err(e) => last_err = format!("{:?}", e),
+            },
+            Err(e) => last_err = e,
+        }
+    }
+
+    let region_closed = |r: &BooleanRegionJs| r.exterior.is_closed(Some(1e-4));
+
+    // Fast path: a single *closed* region is already ideal — keep curvo's smooth
+    // curve (the common case; avoids the geo fallback cost entirely).
+    if best_n == 1 {
+        if let Some(r) = &best {
+            if region_closed(&r[0]) {
+                return Ok(best.unwrap());
+            }
+        }
+    }
+
+    // Otherwise curvo fragmented or returned an open/degenerate region. Use the
+    // deterministic geo fallback when it merges better, or whenever curvo's best
+    // isn't a clean set of closed regions. Genuinely multi-region curvo results
+    // that are all closed and not improved by geo keep their smooth curves.
+    match geo_fallback().ok().filter(|g| !g.is_empty()) {
+        Some(geo_regions) => {
+            let curvo_all_closed =
+                best.as_ref().map_or(false, |r| !r.is_empty() && r.iter().all(region_closed));
+            if !curvo_all_closed || geo_regions.len() < best_n {
+                Ok(geo_regions)
+            } else {
+                Ok(best.unwrap())
+            }
+        }
+        None => best.ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "boolean{}() failed (curvo + geo fallback): {}",
+                op_label, last_err
+            ))
+        }),
+    }
+}
+
+/// Tessellate a 2-D NURBS curve into a closed ring of (x, y) points.
+fn nurbs2d_ring(curve: &NurbsCurve2D<Real>, tol: Real) -> Vec<(Real, Real)> {
+    let mut ring: Vec<(Real, Real)> = curve
+        .tessellate(Some(tol))
+        .iter()
+        .map(|p| (p.x, p.y))
+        .collect();
+    close_ring(&mut ring);
+    ring
+}
+
+/// Tessellate a 2-D compound curve (concatenating its spans) into a closed ring.
+fn compound2d_ring(curve: &CompoundCurve2D<Real>, tol: Real) -> Vec<(Real, Real)> {
+    let mut ring: Vec<(Real, Real)> = curve
+        .spans()
+        .iter()
+        .flat_map(|s| s.tessellate(Some(tol)))
+        .map(|p| (p.x, p.y))
+        .collect();
+    close_ring(&mut ring);
+    ring
+}
+
+fn close_ring(ring: &mut Vec<(Real, Real)>) {
+    if let (Some(&first), Some(&last)) = (ring.first(), ring.last()) {
+        if first != last {
+            ring.push(first);
+        }
+    }
+}
+
+/// Deterministic geo polygon-boolean fallback for curve booleans. Builds geo
+/// polygons from tessellated rings, runs the 2-D boolean, and lifts the result
+/// back onto the working plane as polyline compound curves.
+fn geo_boolean_fallback(
+    self_ring: &[(Real, Real)],
+    other_ring: &[(Real, Real)],
+    op: BooleanOperation,
+    origin: &Point3<Real>,
+    local_x: &Vector3<Real>,
+    local_y: &Vector3<Real>,
+) -> Result<Vec<BooleanRegionJs>, String> {
+    use geo::orient::Direction;
+    use geo::{BooleanOps, LineString, MultiPolygon, Orient, Polygon as GeoPolygon};
+
+    if self_ring.len() < 4 || other_ring.len() < 4 {
+        return Err("geo fallback: degenerate ring".into());
+    }
+
+    let a = MultiPolygon(vec![GeoPolygon::new(LineString::from(self_ring.to_vec()), vec![])]);
+    let b = MultiPolygon(vec![GeoPolygon::new(LineString::from(other_ring.to_vec()), vec![])]);
+
+    let result = match op {
+        BooleanOperation::Intersection => a.intersection(&b),
+        BooleanOperation::Difference => a.difference(&b),
+        _ => a.union(&b),
+    }
+    .orient(Direction::Default);
+
+    let mut regions = Vec::new();
+    for poly in &result.0 {
+        let exterior = ring_to_compound_3d(&poly.exterior().0, origin, local_x, local_y)?;
+        let mut holes = Vec::new();
+        for hole in poly.interiors() {
+            holes.push(ring_to_compound_3d(&hole.0, origin, local_x, local_y)?);
+        }
+        regions.push(BooleanRegionJs { exterior, holes });
+    }
+    Ok(regions)
+}
+
+/// Lift a 2-D geo ring back onto the working plane as a polyline compound curve.
+fn ring_to_compound_3d(
+    coords: &[geo::Coord<Real>],
+    origin: &Point3<Real>,
+    local_x: &Vector3<Real>,
+    local_y: &Vector3<Real>,
+) -> Result<CompoundCurve3D<Real>, String> {
+    let pts: Vec<Point3<Real>> = coords
+        .iter()
+        .map(|c| Point3::from(origin.coords + local_x.scale(c.x) + local_y.scale(c.y)))
+        .collect();
+    if pts.len() < 2 {
+        return Err("geo fallback: degenerate ring".into());
+    }
+    let curve = NurbsCurve3D::polyline(&pts, false);
+    CompoundCurve3D::try_new(vec![curve]).map_err(|e| format!("{:?}", e))
 }
 
 /// Convert a 2D Clip result back to 3D BooleanRegionJs.

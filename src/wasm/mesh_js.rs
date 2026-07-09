@@ -240,28 +240,37 @@ impl MeshJs {
     #[wasm_bindgen(js_name = union)]
     pub fn union(&self, other: &MeshJs) -> Self {
         Self {
-            inner: self.inner.union(&other.inner),
+            inner: self.inner.union(&other.inner).reconstruct_ngons(),
         }
     }
 
     #[wasm_bindgen(js_name = difference)]
     pub fn difference(&self, other: &MeshJs) -> Self {
         Self {
-            inner: self.inner.difference(&other.inner),
+            inner: self.inner.difference(&other.inner).reconstruct_ngons(),
         }
     }
 
     #[wasm_bindgen(js_name = intersection)]
     pub fn intersection(&self, other: &MeshJs) -> Self {
         Self {
-            inner: self.inner.intersection(&other.inner),
+            inner: self.inner.intersection(&other.inner).reconstruct_ngons(),
         }
     }
 
     #[wasm_bindgen(js_name = xor)]
     pub fn xor(&self, other: &MeshJs) -> Self {
         Self {
-            inner: self.inner.xor(&other.inner),
+            inner: self.inner.xor(&other.inner).reconstruct_ngons(),
+        }
+    }
+
+    /// Merge coplanar, edge-adjacent faces back into n-gons. Applied
+    /// automatically after boolean ops; exposed for manual use too.
+    #[wasm_bindgen(js_name = reconstructNgons)]
+    pub fn reconstruct_ngons(&self) -> MeshJs {
+        Self {
+            inner: self.inner.reconstruct_ngons(),
         }
     }
 
@@ -623,6 +632,35 @@ impl MeshJs {
     pub fn from_sketch(sketch_js: &SketchJs) -> MeshJs {
         let mesh = Mesh::from(sketch_js.inner.clone());
         Self { inner: mesh }
+    }
+
+    //// FILE IMPORT ////
+
+    /// Import a Wavefront **OBJ** mesh from its text content.
+    #[wasm_bindgen(js_name = fromOBJ)]
+    pub fn from_obj_js(obj_data: &str, metadata: JsValue) -> Result<MeshJs, JsValue> {
+        let meta = js_metadata_to_string(metadata).unwrap_or(None);
+        let mesh = Mesh::from_obj(std::io::Cursor::new(obj_data.as_bytes()), meta)
+            .map_err(|e| JsValue::from_str(&format!("OBJ import error: {e:?}")))?;
+        Ok(MeshJs { inner: mesh })
+    }
+
+    /// Import a binary or ASCII **STL** mesh from raw bytes.
+    #[wasm_bindgen(js_name = fromSTL)]
+    pub fn from_stl_js(stl_data: &[u8], metadata: JsValue) -> Result<MeshJs, JsValue> {
+        let meta = js_metadata_to_string(metadata).unwrap_or(None);
+        let mesh = Mesh::from_stl(stl_data, meta)
+            .map_err(|e| JsValue::from_str(&format!("STL import error: {e:?}")))?;
+        Ok(MeshJs { inner: mesh })
+    }
+
+    /// Import a **DXF** drawing (closed polylines / circles → faces) as a Mesh.
+    #[wasm_bindgen(js_name = fromDXF)]
+    pub fn from_dxf_js(dxf_data: &[u8], metadata: JsValue) -> Result<MeshJs, JsValue> {
+        let meta = js_metadata_to_string(metadata).unwrap_or(None);
+        let mesh = Mesh::from_dxf(dxf_data, meta)
+            .map_err(|e| JsValue::from_str(&format!("DXF import error: {e}")))?;
+        Ok(MeshJs { inner: mesh })
     }
 
     // Metadata
@@ -1318,6 +1356,7 @@ impl MeshJs {
             visible_polylines: crate::mesh::edge_projection::EdgeProjectionResult {
                 visible_polylines: r.visible_polylines,
                 hidden_polylines: r.hidden_polylines,
+                silhouette_indices: r.silhouette_indices,
             },
             cut: r.cut,
         }

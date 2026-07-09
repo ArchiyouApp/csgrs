@@ -17,6 +17,19 @@ pub struct SketchJs {
     pub(crate) inner: Sketch<String>,
 }
 
+/// Push one ring `{ points: Float64Array([x0,y0,...]), closed }` onto `out`.
+fn push_ring_2d(out: &js_sys::Array, coords: &[geo::Coord<Real>], closed: bool) {
+    let mut flat: Vec<f64> = Vec::with_capacity(coords.len() * 2);
+    for c in coords {
+        flat.push(c.x as f64);
+        flat.push(c.y as f64);
+    }
+    let obj = Object::new();
+    Reflect::set(&obj, &"points".into(), &Float64Array::from(flat.as_slice())).unwrap();
+    Reflect::set(&obj, &"closed".into(), &JsValue::from_bool(closed)).unwrap();
+    out.push(&obj);
+}
+
 #[wasm_bindgen]
 impl SketchJs {
     #[wasm_bindgen(constructor)]
@@ -80,6 +93,45 @@ impl SketchJs {
         Reflect::set(&obj, &"normals".into(), &norm_array).unwrap();
         Reflect::set(&obj, &"indices".into(), &idx_array).unwrap();
         obj.into()
+    }
+
+    /// Typed accessor for ring geometry. Returns
+    /// `Array<{ points: Float64Array([x0,y0,x1,y1,...]), closed: boolean }>`.
+    /// Polygon exteriors and holes are emitted as separate `closed: true`
+    /// rings; LineStrings / Lines come back as `closed: false`.
+    #[wasm_bindgen(js_name = rings)]
+    pub fn rings(&self) -> JsValue {
+        let out = js_sys::Array::new();
+        for geom in &self.inner.geometry.0 {
+            match geom {
+                Geometry::Polygon(p) => {
+                    push_ring_2d(&out, &p.exterior().0, true);
+                    for hole in p.interiors() {
+                        push_ring_2d(&out, &hole.0, true);
+                    }
+                }
+                Geometry::MultiPolygon(mp) => {
+                    for p in &mp.0 {
+                        push_ring_2d(&out, &p.exterior().0, true);
+                        for hole in p.interiors() {
+                            push_ring_2d(&out, &hole.0, true);
+                        }
+                    }
+                }
+                Geometry::LineString(ls) => push_ring_2d(&out, &ls.0, false),
+                Geometry::MultiLineString(mls) => {
+                    for ls in &mls.0 {
+                        push_ring_2d(&out, &ls.0, false);
+                    }
+                }
+                Geometry::Line(l) => {
+                    let coords = [l.start, l.end];
+                    push_ring_2d(&out, &coords, false);
+                }
+                _ => {} // Point / MultiPoint / GeometryCollection / Rect / Triangle
+            }
+        }
+        out.into()
     }
 
     #[wasm_bindgen(js_name = polygon)]
