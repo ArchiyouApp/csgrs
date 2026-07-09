@@ -74,6 +74,8 @@ stl_io = { version = "0.8", optional = true }
 image = { version = "0.25", optional = true }
 svg = { version = "0.18", optional = true }
 nom = { version = "7.1", optional = true }
+roxmltree = { version = "0.20", optional = true }
+zip = { version = "2.2", optional = true, default-features = false, features = ["deflate"] }
 
 # font
 ttf-utils = { version = "0.1", optional = true, package = "ttf-parser-utils"}
@@ -95,7 +97,7 @@ console_error_panic_hook = { version = "0.1.7", optional = true }
 uuid = { version = "1.18", features = ["js"] }
 
 [features]
-default = ["f64", "bmesh", "mesh", "sketch", "stl-io", "dxf-io", "obj-io", "ply-io", "amf-io", "gltf-io", "chull-io", "image-io", "metaballs", "sdf", "delaunay", "truetype-text", "hershey-text"]
+default = ["f64", "bmesh", "mesh", "sketch", "stl-io", "dxf-io", "obj-io", "ply-io", "amf-io", "threemf-io", "gltf-io", "chull-io", "image-io", "metaballs", "sdf", "delaunay", "truetype-text", "hershey-text"]
 parallel = [
   "rayon",
   "geo/multithreading",
@@ -146,7 +148,12 @@ ply-io = [
   # PLY format support - no external dependencies needed
 ]
 amf-io = [
-  # AMF format support - no external dependencies needed
+  "roxmltree",
+  "zip",
+]
+threemf-io = [
+  "roxmltree",
+  "zip",
 ]
 gltf-io = [
   "base64",

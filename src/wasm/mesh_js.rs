@@ -672,6 +672,24 @@ impl MeshJs {
         Ok(MeshJs { inner: mesh })
     }
 
+    /// Import an **AMF** model (plain XML or zipped) as a merged Mesh.
+    #[wasm_bindgen(js_name = fromAMF)]
+    pub fn from_amf_js(data: &[u8], metadata: JsValue) -> Result<MeshJs, JsValue> {
+        let meta = js_metadata_to_string(metadata).unwrap_or(None);
+        let mesh = Mesh::from_amf(data, meta)
+            .map_err(|e| JsValue::from_str(&format!("AMF import error: {e}")))?;
+        Ok(MeshJs { inner: mesh })
+    }
+
+    /// Import a **3MF** package as a merged Mesh (geometry only).
+    #[wasm_bindgen(js_name = from3MF)]
+    pub fn from_3mf_js(data: &[u8], metadata: JsValue) -> Result<MeshJs, JsValue> {
+        let meta = js_metadata_to_string(metadata).unwrap_or(None);
+        let mesh = Mesh::from_3mf(data, meta)
+            .map_err(|e| JsValue::from_str(&format!("3MF import error: {e}")))?;
+        Ok(MeshJs { inner: mesh })
+    }
+
     // Metadata
     #[wasm_bindgen(js_name = sameMetadata)]
     pub fn same_metadata(&self, other: &MeshJs) -> bool {

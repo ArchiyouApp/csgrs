@@ -9,6 +9,51 @@ use nalgebra::Point3;
 use std::fmt::Debug;
 use std::io::Write;
 
+impl<S: Clone + Send + Sync + Debug> crate::mesh::Mesh<S> {
+    /// Import a Mesh from **AMF** (Additive Manufacturing Format). Accepts plain
+    /// XML or a zipped `.amf`. All `<object>`/`<mesh>` volumes are merged;
+    /// per-vertex/per-triangle colors and curved elements are ignored.
+    pub fn from_amf(data: &[u8], metadata: Option<S>) -> Result<crate::mesh::Mesh<S>, String> {
+        let xml = crate::io::unzip_or_text(data, ".amf")?;
+        let doc =
+            roxmltree::Document::parse(&xml).map_err(|e| format!("AMF XML parse error: {e}"))?;
+
+        let mut verts: Vec<Point3<Real>> = Vec::new();
+        let mut tris: Vec<[usize; 3]> = Vec::new();
+
+        for mesh in doc.descendants().filter(|n| n.tag_name().name() == "mesh") {
+            let base = verts.len();
+            for v in mesh.descendants().filter(|n| n.tag_name().name() == "vertex") {
+                if let Some(coords) = v.children().find(|n| n.tag_name().name() == "coordinates") {
+                    let get = |tag: &str| {
+                        coords
+                            .children()
+                            .find(|n| n.tag_name().name() == tag)
+                            .and_then(|n| n.text())
+                            .and_then(|t| t.trim().parse::<Real>().ok())
+                    };
+                    if let (Some(x), Some(y), Some(z)) = (get("x"), get("y"), get("z")) {
+                        verts.push(Point3::new(x, y, z));
+                    }
+                }
+            }
+            for tri in mesh.descendants().filter(|n| n.tag_name().name() == "triangle") {
+                let get = |tag: &str| {
+                    tri.children()
+                        .find(|n| n.tag_name().name() == tag)
+                        .and_then(|n| n.text())
+                        .and_then(|t| t.trim().parse::<usize>().ok())
+                };
+                if let (Some(a), Some(b), Some(c)) = (get("v1"), get("v2"), get("v3")) {
+                    tris.push([base + a, base + b, base + c]);
+                }
+            }
+        }
+
+        Ok(crate::io::build_tri_mesh(&verts, &tris, metadata))
+    }
+}
+
 /// Add a vertex to the list, reusing an existing one if position is within `tolerance()`.
 fn add_unique_vertex_amf(vertices: &mut Vec<Point3<Real>>, vertex: Point3<Real>) -> usize {
     for (i, existing) in vertices.iter().enumerate() {

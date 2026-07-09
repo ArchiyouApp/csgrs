@@ -19,6 +19,65 @@ mod amf;
 #[cfg(feature = "gltf-io")]
 pub mod gltf;
 
+#[cfg(feature = "threemf-io")]
+mod threemf;
+
+/// Read XML text from raw bytes: if the data is a ZIP (3MF, zipped AMF),
+/// extract the first entry whose name ends with `want_ext`; otherwise treat the
+/// bytes as UTF-8 XML.
+#[cfg(any(feature = "amf-io", feature = "threemf-io"))]
+pub(crate) fn unzip_or_text(data: &[u8], want_ext: &str) -> Result<String, String> {
+    if data.len() >= 4 && &data[0..4] == b"PK\x03\x04" {
+        use std::io::{Cursor, Read};
+        let mut archive =
+            zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("zip open error: {e}"))?;
+        let mut chosen = 0usize;
+        for i in 0..archive.len() {
+            if let Ok(f) = archive.by_index(i) {
+                if f.name().to_ascii_lowercase().ends_with(want_ext) {
+                    chosen = i;
+                    break;
+                }
+            }
+        }
+        let mut f = archive
+            .by_index(chosen)
+            .map_err(|e| format!("zip entry error: {e}"))?;
+        let mut s = String::new();
+        f.read_to_string(&mut s)
+            .map_err(|e| format!("zip read error: {e}"))?;
+        Ok(s)
+    } else {
+        String::from_utf8(data.to_vec()).map_err(|e| format!("input is not UTF-8 XML: {e}"))
+    }
+}
+
+/// Build a triangle Mesh from a vertex pool + triangle index list, computing a
+/// per-face normal and skipping degenerate (zero-area) triangles.
+#[cfg(any(feature = "amf-io", feature = "threemf-io"))]
+pub(crate) fn build_tri_mesh<S: Clone + Send + Sync + std::fmt::Debug>(
+    verts: &[nalgebra::Point3<crate::float_types::Real>],
+    tris: &[[usize; 3]],
+    metadata: Option<S>,
+) -> crate::mesh::Mesh<S> {
+    use crate::polygon::Polygon;
+    use crate::vertex::Vertex;
+    let polygons: Vec<Polygon<S>> = tris
+        .iter()
+        .filter_map(|t| {
+            let a = verts.get(t[0])?;
+            let b = verts.get(t[1])?;
+            let c = verts.get(t[2])?;
+            let n = (*b - *a).cross(&(*c - *a)).try_normalize(1e-12)?;
+            Some(Polygon::new(
+                vec![Vertex::new(*a, n), Vertex::new(*b, n), Vertex::new(*c, n)],
+                metadata.clone(),
+            ))
+        })
+        .collect();
+    crate::mesh::Mesh::from_polygons(&polygons, metadata)
+}
+
 /// Generic I/O and format‑conversion errors.
 ///
 /// Many I/O features are behind cargo feature‑flags.  
