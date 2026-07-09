@@ -12,6 +12,95 @@ use std::io::Write;
 use base64::engine::general_purpose::STANDARD as BASE64_ENGINE;
 use base64::Engine;
 
+impl<S: Clone + Send + Sync + Debug> crate::mesh::Mesh<S> {
+    /// Import a glTF 2.0 model (`.glb` or `.gltf`) as a single **merged** Mesh.
+    ///
+    /// Every mesh primitive across the scene is read, transformed by its node's
+    /// world transform, converted from glTF Y-up to meshup Z-up, and merged into
+    /// one Mesh. Materials and the node hierarchy are flattened. Draco/Meshopt
+    /// compression and external-buffer files are unsupported — pass a
+    /// self-contained `.glb` or a base64-embedded `.gltf`.
+    pub fn from_gltf(data: &[u8], metadata: Option<S>) -> Result<crate::mesh::Mesh<S>, String> {
+        use crate::polygon::Polygon;
+        use nalgebra::{Matrix4, Vector4};
+
+        let (doc, buffers, _images) =
+            gltf::import_slice(data).map_err(|e| format!("glTF parse error: {e:?}"))?;
+
+        let mut polygons: Vec<Polygon<S>> = Vec::new();
+
+        // Depth-first node walk with accumulated world transforms.
+        let identity = Matrix4::<Real>::identity();
+        let mut stack: Vec<(gltf::Node, Matrix4<Real>)> = doc
+            .scenes()
+            .flat_map(|scene| scene.nodes().map(|n| (n, identity)).collect::<Vec<_>>())
+            .collect();
+
+        while let Some((node, parent)) = stack.pop() {
+            let m = node.transform().matrix(); // column-major [[f32;4];4]
+            let local = Matrix4::<Real>::from_columns(&[
+                Vector4::new(m[0][0] as Real, m[0][1] as Real, m[0][2] as Real, m[0][3] as Real),
+                Vector4::new(m[1][0] as Real, m[1][1] as Real, m[1][2] as Real, m[1][3] as Real),
+                Vector4::new(m[2][0] as Real, m[2][1] as Real, m[2][2] as Real, m[2][3] as Real),
+                Vector4::new(m[3][0] as Real, m[3][1] as Real, m[3][2] as Real, m[3][3] as Real),
+            ]);
+            let world = parent * local;
+            let nmat = world.fixed_view::<3, 3>(0, 0).into_owned();
+
+            if let Some(mesh) = node.mesh() {
+                for prim in mesh.primitives() {
+                    let reader = prim.reader(|b| buffers.get(b.index()).map(|d| &d.0[..]));
+                    let positions: Vec<[f32; 3]> = match reader.read_positions() {
+                        Some(it) => it.collect(),
+                        None => continue,
+                    };
+                    let normals: Option<Vec<[f32; 3]>> =
+                        reader.read_normals().map(|it| it.collect());
+                    let indices: Vec<u32> = match reader.read_indices() {
+                        Some(it) => it.into_u32().collect(),
+                        None => (0..positions.len() as u32).collect(),
+                    };
+
+                    for tri in indices.chunks_exact(3) {
+                        let mut verts = Vec::with_capacity(3);
+                        for &idx in tri {
+                            let pi = idx as usize;
+                            let Some(p) = positions.get(pi) else { continue };
+                            // world transform (homogeneous), then glTF Y-up → Z-up
+                            let hp = world
+                                * Vector4::new(p[0] as Real, p[1] as Real, p[2] as Real, 1.0);
+                            let (x, y, z) = (hp.x / hp.w, hp.y / hp.w, hp.z / hp.w);
+                            let pos = Point3::new(x, -z, y);
+
+                            let n = normals
+                                .as_ref()
+                                .and_then(|ns| ns.get(pi))
+                                .map(|nn| {
+                                    let wn = nmat
+                                        * Vector3::new(nn[0] as Real, nn[1] as Real, nn[2] as Real);
+                                    wn.try_normalize(1e-9).unwrap_or_else(Vector3::zeros)
+                                })
+                                .unwrap_or_else(Vector3::zeros);
+                            let normal = Vector3::new(n.x, -n.z, n.y);
+
+                            verts.push(Vertex::new(pos, normal));
+                        }
+                        if verts.len() == 3 {
+                            polygons.push(Polygon::new(verts, metadata.clone()));
+                        }
+                    }
+                }
+            }
+
+            for child in node.children() {
+                stack.push((child, world));
+            }
+        }
+
+        Ok(crate::mesh::Mesh::from_polygons(&polygons, metadata))
+    }
+}
+
 /// Defines which axis is considered "up" in the source coordinate system
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UpAxis {

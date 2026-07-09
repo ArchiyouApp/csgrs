@@ -663,6 +663,15 @@ impl MeshJs {
         Ok(MeshJs { inner: mesh })
     }
 
+    /// Import a **glTF 2.0** model (`.glb` or `.gltf`) as a single merged Mesh.
+    #[wasm_bindgen(js_name = fromGLTF)]
+    pub fn from_gltf_js(data: &[u8], metadata: JsValue) -> Result<MeshJs, JsValue> {
+        let meta = js_metadata_to_string(metadata).unwrap_or(None);
+        let mesh = Mesh::from_gltf(data, meta)
+            .map_err(|e| JsValue::from_str(&format!("glTF import error: {e}")))?;
+        Ok(MeshJs { inner: mesh })
+    }
+
     // Metadata
     #[wasm_bindgen(js_name = sameMetadata)]
     pub fn same_metadata(&self, other: &MeshJs) -> bool {
