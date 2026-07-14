@@ -203,6 +203,8 @@ wasm = [
   "console_error_panic_hook",
   "getrandom",
   "offset",
+  "truetype-text",
+  "hershey-text",
 ]
 spade = ["dep:spade"]
 boolmesh = ["dep:boolmesh"]

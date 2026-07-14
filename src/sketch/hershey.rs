@@ -69,6 +69,73 @@ impl<S: Clone + Debug + Send + Sync> Sketch<S> {
             metadata,
         }
     }
+
+    /// Convenience wrapper around [`Sketch::from_hershey`] that accepts the raw
+    /// text of a Hershey `.jhf` font file instead of a pre-built [`Font`].
+    ///
+    /// The `.jhf` records are parsed (see [`parse_jhf_records`]) into per-glyph
+    /// coordinate strings and indexed from `offset` (ASCII space `' '` for the
+    /// standard single-stroke fonts, where record 0 is the space glyph).
+    ///
+    /// # Parameters
+    /// - `text`:   the text to render
+    /// - `jhf`:    the full contents of a `.jhf` font file
+    /// - `size`:   scale factor for glyphs
+    /// - `offset`: the character mapped to the first record (usually `' '`)
+    /// - `metadata`: optional user data stored on the resulting Sketch
+    pub fn from_hershey_str(
+        text: &str,
+        jhf: &str,
+        size: Real,
+        offset: char,
+        metadata: Option<S>,
+    ) -> Sketch<S> {
+        let records = parse_jhf_records(jhf);
+        let refs: Vec<&str> = records.iter().map(String::as_str).collect();
+        let font = Font::new(&refs, offset);
+        Self::from_hershey(text, &font, size, metadata)
+    }
+}
+
+/// Parse a Hershey `.jhf` font file into per-glyph coordinate strings suitable
+/// for [`hershey::Font::new`].
+///
+/// The `.jhf` format packs each glyph as: 5 columns of glyph number, 3 columns
+/// of vertex count `n` (which *includes* the leading left/right-bearing pair),
+/// then `n` coordinate pairs (2 chars each). Long glyphs wrap across multiple
+/// physical lines with no repeated header, so we flatten all newlines first and
+/// then slice records by their declared vertex count. The returned strings have
+/// the 8-char header removed — exactly what the `hershey` crate's glyph parser
+/// expects.
+pub fn parse_jhf_records(jhf: &str) -> Vec<String> {
+    // Join physical lines with no separator; coordinate pairs are 2 chars wide
+    // and header/line widths are even, so pairs never straddle a line break.
+    let chars: Vec<char> = jhf.lines().collect::<String>().chars().collect();
+
+    let mut records = Vec::new();
+    let mut i = 0;
+    while i + 8 <= chars.len() {
+        // Columns [i+5 .. i+8] hold the (right-justified) vertex count.
+        let nvert: usize = match chars[i + 5..i + 8]
+            .iter()
+            .collect::<String>()
+            .trim()
+            .parse()
+        {
+            Ok(n) => n,
+            Err(_) => break, // malformed / trailing content — stop cleanly
+        };
+        if nvert == 0 {
+            break;
+        }
+
+        let start = i + 8;
+        let end = (start + nvert * 2).min(chars.len());
+        records.push(chars[start..end].iter().collect());
+        i = end;
+    }
+
+    records
 }
 
 /// Helper for building open polygons from a single Hershey `Glyph`.

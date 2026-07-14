@@ -220,6 +220,44 @@ impl SketchJs {
         Ok(SketchJs { inner: sketch })
     }
 
+    /// Build a 2-D Sketch from **outline (filled) text** using a TrueType/OpenType
+    /// font. Each glyph becomes closed `Polygon`(s) with holes for counters (the
+    /// hole in `O`, `e`, `A`, …), plus open `LineString`s for any open contours.
+    /// `scale` is the desired point size; glyphs are laid out with the font's own
+    /// horizontal advance metrics. Extrude the result for solid 3-D text.
+    ///
+    /// See `Sketch::text`.
+    #[cfg(feature = "truetype-text")]
+    #[wasm_bindgen(js_name = text)]
+    pub fn text(text: &str, font_data: &[u8], scale: Real, metadata: JsValue) -> SketchJs {
+        let meta = js_metadata_to_string(metadata).unwrap_or(None);
+        SketchJs {
+            inner: Sketch::text(text, font_data, scale, meta),
+        }
+    }
+
+    /// Build a 2-D Sketch from **single-stroke line text** using a Hershey `.jhf`
+    /// font. Each glyph stroke becomes an open `LineString` (ideal for CNC
+    /// engraving / pen plotting). `offset_code` is the Unicode code point mapped
+    /// to the font's first record (32 = ASCII space for the standard fonts).
+    ///
+    /// See `Sketch::from_hershey_str`.
+    #[cfg(feature = "hershey-text")]
+    #[wasm_bindgen(js_name = fromHershey)]
+    pub fn from_hershey(
+        text: &str,
+        jhf: &str,
+        size: Real,
+        offset_code: u32,
+        metadata: JsValue,
+    ) -> SketchJs {
+        let meta = js_metadata_to_string(metadata).unwrap_or(None);
+        let offset = char::from_u32(offset_code).unwrap_or(' ');
+        SketchJs {
+            inner: Sketch::from_hershey_str(text, jhf, size, offset, meta),
+        }
+    }
+
     #[wasm_bindgen(js_name=toMultiPolygon)]
     pub fn to_multipolygon(&self) -> String {
         let mp = self.inner.to_multipolygon();

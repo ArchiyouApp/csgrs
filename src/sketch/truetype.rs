@@ -42,14 +42,23 @@ impl<S: Clone + Debug + Send + Sync> Sketch<S> {
             },
         };
 
-        // 1 font unit, 2048 font units / em, scale points / em, 0.352777 points / mm
-        let font_scale = 1.0 / 2048.0 * scale * 0.3527777;
+        // Scale font units → millimetres. `scale` is the desired point size; we
+        // divide by the font's own units-per-em (2048 for most TTF, 1000 for many
+        // OTF/PostScript fonts) instead of assuming 2048, then convert points → mm
+        // (1 pt = 0.3527777 mm).
+        let units_per_em = face.units_per_em() as Real;
+        let units_per_em = if units_per_em > 0.0 { units_per_em } else { 2048.0 };
+        let font_scale = 1.0 / units_per_em * scale * 0.3527777;
 
         // 2) We'll collect all glyph geometry into one GeometryCollection
         let mut geo_coll = GeometryCollection::default();
 
         // 3) A simple "pen" cursor for horizontal text layout
         let mut cursor_x = 0.0 as Real;
+
+        // Fallback advance (in font units) for glyphs without their own metric
+        // and for characters missing from the font: ~1/3 em reads as a space.
+        let fallback_advance = units_per_em * 0.33;
 
         for ch in text.chars() {
             // Skip control chars:
@@ -59,6 +68,15 @@ impl<S: Clone + Debug + Send + Sync> Sketch<S> {
 
             // Find glyph index in the font
             if let Some(gid) = face.glyph_index(ch) {
+                // Horizontal advance from the font's `hmtx` table (proper spacing,
+                // including the width of the space glyph). Fall back if absent.
+                let advance = face
+                    .glyph_hor_advance(gid)
+                    .map(|a| a as Real)
+                    .filter(|a| *a > 0.0)
+                    .unwrap_or(fallback_advance)
+                    * font_scale;
+
                 // Extract the glyph outline (if any)
                 if let Some(outline) = Outline::new(&face, gid) {
                     // Flatten the outline into line segments
@@ -132,17 +150,15 @@ impl<S: Clone + Debug + Send + Sync> Sketch<S> {
                         }
                     }
 
-                    // Finally, advance our pen by the glyph's bounding-box width
-                    let bbox = outline.bbox();
-                    let glyph_width = bbox.width() as Real * font_scale;
-                    cursor_x += glyph_width;
+                    // Finally, advance our pen by the glyph's horizontal advance.
+                    cursor_x += advance;
                 } else {
-                    // If there's no outline (e.g., space), just move a bit
-                    cursor_x += font_scale as Real * 0.3;
+                    // No outline (e.g. space): still advance by its metric width.
+                    cursor_x += advance;
                 }
             } else {
-                // Missing glyph => small blank advance
-                cursor_x += font_scale as Real * 0.3;
+                // Missing glyph => blank advance of ~1/3 em.
+                cursor_x += fallback_advance * font_scale;
             }
         }
 
